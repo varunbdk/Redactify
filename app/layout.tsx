@@ -13,17 +13,22 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Redactify — Redact sensitive details with confidence",
-  description: "Review AI-suggested PDF redactions and permanently protect sensitive information.",
+  metadataBase: new URL("https://redactify.varun-bdk.workers.dev"),
+  title: "Redactify — Local PDF redaction",
+  description:
+    "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
   openGraph: {
-    title: "Redactify — Redact sensitive details with confidence",
-    description: "Review AI-suggested PDF redactions and permanently protect sensitive information.",
-    images: ["/og.png"],
+    title: "Redactify — Redact with surgical precision",
+    description:
+      "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
+    images: ["/og-redesign.png"],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Redactify — Redact sensitive details with confidence",
-    images: ["/og.png"],
+    title: "Redactify — Redact with surgical precision",
+    description:
+      "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
+    images: ["/og-redesign.png"],
   },
   icons: {
     icon: "/favicon.svg",
