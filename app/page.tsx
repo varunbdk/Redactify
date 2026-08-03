@@ -141,6 +141,7 @@ function PdfPageView({
   onEditStart,
   onUpdateRect,
   onDeleteFinding,
+  onConfirmFinding,
 }: {
   bytes: Uint8Array;
   pageNumber: number;
@@ -153,6 +154,7 @@ function PdfPageView({
   onEditStart: () => void;
   onUpdateRect: (findingId: string, rectIndex: number, rect: Rect) => void;
   onDeleteFinding: (findingId: string) => void;
+  onConfirmFinding: (findingId: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -367,14 +369,27 @@ function PdfPageView({
           {(["n", "ne", "e", "se", "s", "sw", "w", "nw"] as ResizeDirection[]).map((direction) =>
             <span key={direction} className={`resize-handle handle-${direction}`} data-handle={direction} aria-hidden="true" />)}
         </button>
-        {finding.manual && activeFindingId === finding.id && <button
-          type="button"
-          className="redaction-delete-button"
-          style={{ left: (rect.x + rect.width) * zoom - 15, top: rect.y * zoom - 36 }}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => { event.stopPropagation(); onDeleteFinding(finding.id); }}
-          aria-label="Delete selected manual redaction"
-        >× <span>Delete box</span></button>}
+        {activeFindingId === finding.id && <div
+          className={`redaction-box-actions ${finding.manual ? "manual-actions" : "detected-actions"}`}
+          style={{ left: (rect.x + rect.width) * zoom - (finding.manual ? 34 : 70), top: rect.y * zoom - 38 }}
+        >
+          {!finding.manual && <button
+            type="button"
+            className="box-action confirm-box-action"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => { event.stopPropagation(); onConfirmFinding(finding.id); }}
+            aria-label="Confirm detected redaction"
+            title="Confirm redaction"
+          >✓</button>}
+          <button
+            type="button"
+            className="box-action delete-box-action"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => { event.stopPropagation(); onDeleteFinding(finding.id); }}
+            aria-label={finding.manual ? "Delete selected manual redaction" : "Delete detected redaction"}
+            title="Delete redaction"
+          ><span className="trash-icon" aria-hidden="true" /></button>
+        </div>}
       </Fragment>)}
       {draft && <span className="redaction-draft" style={{ left: draft.x, top: draft.y, width: draft.width, height: draft.height }} />}
     </div>}
@@ -459,6 +474,17 @@ export default function Home() {
     if (!activeFindingId) return;
     document.getElementById(`finding-${activeFindingId}`)?.scrollIntoView({ block: "nearest" });
   }, [activeFindingId]);
+
+  useEffect(() => {
+    if (!drawing) return;
+    const stopDrawingWithEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setDrawing(false);
+      setMessage("Drawing mode stopped.");
+    };
+    window.addEventListener("keydown", stopDrawingWithEscape);
+    return () => window.removeEventListener("keydown", stopDrawingWithEscape);
+  }, [drawing]);
 
   const analyzeFile = async (file?: File) => {
     if (!file) return;
@@ -661,8 +687,7 @@ export default function Home() {
     }]);
     setFilter("All");
     setActiveFindingId(id);
-    setDrawing(false);
-    setMessage(`Manual redaction added to page ${rect.page}.`);
+    setMessage(`Manual redaction added to page ${rect.page}. Draw another box or press Esc when finished.`);
   };
   const removeFinding = (id: string) => {
     checkpoint();
@@ -749,11 +774,14 @@ export default function Home() {
               <span>{Math.round(zoom * 100)}%</span>
               <button type="button" onClick={() => setZoom((value) => Math.min(1.75, Number((value + .15).toFixed(2))))} disabled={zoom >= 1.75} aria-label="Zoom in">+</button>
             </div>
-            <button type="button" className={`draw-button ${drawing ? "active" : ""}`} onClick={() => setDrawing((value) => !value)} aria-pressed={drawing}>
-              {drawing ? "Cancel drawing" : "+ Draw redaction"}
+            <button type="button" className={`draw-button ${drawing ? "active" : ""}`} onClick={() => setDrawing(true)} aria-pressed={drawing} disabled={drawing}>
+              {drawing ? "Drawing mode on" : "+ Draw redaction"}
             </button>
+            {drawing && <button type="button" className="stop-drawing-button" onClick={() => { setDrawing(false); setMessage("Drawing mode stopped."); }}>
+              Stop drawing <kbd>Esc</kbd>
+            </button>}
           </div>
-          {drawing && <div className="draw-help" role="status">Drag across anything else you want to remove. The box will be added to your review list.</div>}
+          {drawing && <div className="draw-help" role="status">Draw as many boxes as you need. Press Esc or “Stop drawing” when you are finished.</div>}
           {inspection && <div className={`inspection-strip ${inspection.pagesNeedingOcr.length ? "needs-ocr" : "ready"}`}>
             <span>LOCAL RUST/WASM INSPECTOR</span>
             <strong>{inspection.pdfType.replace(/([a-z])([A-Z])/g, "$1 $2")}</strong>
@@ -782,6 +810,7 @@ export default function Home() {
                 onEditStart={checkpoint}
                 onUpdateRect={updateRect}
                 onDeleteFinding={removeFinding}
+                onConfirmFinding={(id) => toggle(id, true)}
               />
             </div>)}
           </div>

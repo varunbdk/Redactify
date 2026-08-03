@@ -54,7 +54,12 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Merge boxes/);
   assert.match(page, /onUpdateRect=\{updateRect\}/);
   assert.match(page, /onDeleteFinding=\{removeFinding\}/);
+  assert.match(page, /onConfirmFinding=\{\(id\) => toggle\(id, true\)\}/);
   assert.match(page, /Delete selected manual redaction/);
+  assert.match(page, /Confirm detected redaction/);
+  assert.match(page, /Stop drawing/);
+  assert.match(page, /event\.key !== "Escape"/);
+  assert.match(page, /Draw another box or press Esc/);
   assert.match(page, /className="pdf-page-entry"/);
   assert.match(page, /onScroll=\{updatePageFromScroll\}/);
   assert.match(page, /left: draft\.x, top: draft\.y/);
@@ -66,7 +71,11 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.resize-handle/);
   assert.match(css, /\.handle-n/);
   assert.match(css, /\.handle-w/);
-  assert.match(css, /\.redaction-delete-button/);
+  assert.match(css, /\.redaction-box-actions/);
+  assert.match(css, /\.confirm-box-action/);
+  assert.match(css, /\.delete-box-action:hover/);
+  assert.match(css, /\.trash-icon/);
+  assert.match(css, /\.stop-drawing-button/);
   assert.match(css, /\.review-sidebar-toolbar/);
   assert.match(css, /cursor:crosshair/);
 });
