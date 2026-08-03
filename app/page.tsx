@@ -641,6 +641,7 @@ function PdfPageView({
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const historyRef = useRef<Finding[][]>([]);
+  const redoRef = useRef<Finding[][]>([]);
   const exportedPdfRef = useRef<Uint8Array | null>(null);
   const occurrenceRef = useRef(new Map<string, number>());
   const stageRef = useRef<HTMLDivElement>(null);
@@ -665,6 +666,7 @@ export default function Home() {
   const [inspection, setInspection] = useState<LocalInspection | null>(null);
   const [verification, setVerification] = useState<VerificationResult | null>(null);
   const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
 
   const selectedCount = findings.filter((finding) => finding.selected).length;
   const bulkSelectionCount = selectedFindingIds.size;
@@ -712,18 +714,35 @@ export default function Home() {
 
   const checkpoint = () => {
     historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+    redoRef.current = [];
     setCanUndo(true);
+    setCanRedo(false);
   };
 
   const undo = () => {
     const previous = historyRef.current.at(-1);
     if (!previous) return;
+    redoRef.current = [...redoRef.current.slice(-29), cloneFindings(findings)];
     historyRef.current = historyRef.current.slice(0, -1);
     setFindings(previous);
     setActiveFindingId(null);
     setSelectedFindingIds(new Set());
     setCanUndo(historyRef.current.length > 0);
+    setCanRedo(true);
     setMessage("Last redaction edit undone.");
+  };
+
+  const redo = () => {
+    const next = redoRef.current.at(-1);
+    if (!next) return;
+    historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+    redoRef.current = redoRef.current.slice(0, -1);
+    setFindings(next);
+    setActiveFindingId(null);
+    setSelectedFindingIds(new Set());
+    setCanUndo(true);
+    setCanRedo(redoRef.current.length > 0);
+    setMessage("Last undone redaction edit restored.");
   };
 
   useEffect(() => {
@@ -735,6 +754,38 @@ export default function Home() {
     const handleEditorKeys = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, [contenteditable='true']")) return;
+      const key = event.key.toLocaleLowerCase();
+      const modifier = event.metaKey || event.ctrlKey;
+      const wantsUndo = modifier && key === "z" && !event.shiftKey;
+      const wantsRedo = modifier && ((key === "z" && event.shiftKey) || key === "y");
+      if (wantsUndo) {
+        const previous = historyRef.current.at(-1);
+        if (!previous) return;
+        event.preventDefault();
+        redoRef.current = [...redoRef.current.slice(-29), cloneFindings(findings)];
+        historyRef.current = historyRef.current.slice(0, -1);
+        setFindings(previous);
+        setActiveFindingId(null);
+        setSelectedFindingIds(new Set());
+        setCanUndo(historyRef.current.length > 0);
+        setCanRedo(true);
+        setMessage("Last redaction edit undone.");
+        return;
+      }
+      if (wantsRedo) {
+        const next = redoRef.current.at(-1);
+        if (!next) return;
+        event.preventDefault();
+        historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+        redoRef.current = redoRef.current.slice(0, -1);
+        setFindings(next);
+        setActiveFindingId(null);
+        setSelectedFindingIds(new Set());
+        setCanUndo(true);
+        setCanRedo(redoRef.current.length > 0);
+        setMessage("Last undone redaction edit restored.");
+        return;
+      }
       if (event.key === "Escape") {
         if (drawing) {
           setDrawing(false);
@@ -748,7 +799,9 @@ export default function Home() {
       if ((event.key !== "Delete" && event.key !== "Backspace") || !selectedFindingIds.size) return;
       event.preventDefault();
       historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+      redoRef.current = [];
       setCanUndo(true);
+      setCanRedo(false);
       setFindings((items) => items.filter((item) => !selectedFindingIds.has(item.id)));
       setActiveFindingId(null);
       setSelectedFindingIds(new Set());
@@ -797,7 +850,9 @@ export default function Home() {
     exportedPdfRef.current = null;
     occurrenceRef.current.clear();
     historyRef.current = [];
+    redoRef.current = [];
     setCanUndo(false);
+    setCanRedo(false);
     setAnalyzing(true);
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -1052,7 +1107,9 @@ export default function Home() {
     exportedPdfRef.current = null;
     occurrenceRef.current.clear();
     historyRef.current = [];
+    redoRef.current = [];
     setCanUndo(false);
+    setCanRedo(false);
   };
   const toggle = (id: string, selected: boolean) => { checkpoint(); setFindings((items) => items.map((item) => item.id === id ? { ...item, selected } : item)); };
   const acceptAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: true }))); };
@@ -1344,7 +1401,8 @@ export default function Home() {
             <div className="decision-summary"><span>{selectedCount} selected</span><i /><span>{findings.length - selectedCount} kept</span></div>
             {reviewCount > 0 && <div className="review-alert"><strong>{reviewCount} uncertain</strong><span>Check these suggestions before export.</span></div>}
             <div className="sidebar-actions">
-              <button className="mini-button" onClick={undo} disabled={!canUndo}>↶ Undo</button>
+              <button className="mini-button history-button" onClick={undo} disabled={!canUndo} title="Undo (Command/Ctrl + Z)">↶ Undo <kbd>⌘/Ctrl Z</kbd></button>
+              <button className="mini-button history-button" onClick={redo} disabled={!canRedo} title="Redo (Command + Shift + Z or Ctrl + Y)">↷ Redo <kbd>⇧⌘Z/Ctrl Y</kbd></button>
               <button className="mini-button accept" onClick={acceptAll}>Redact all</button>
               <button className="mini-button" onClick={rejectAll}>Keep all</button>
             </div>

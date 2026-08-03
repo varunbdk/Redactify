@@ -78,6 +78,13 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Labelled person name/);
   assert.match(page, /Manual review needed/);
   assert.match(page, /↶ Undo/);
+  assert.match(page, /↷ Redo/);
+  assert.match(page, /redoRef/);
+  assert.match(page, /const redo =/);
+  assert.match(page, /wantsUndo/);
+  assert.match(page, /wantsRedo/);
+  assert.match(page, /key === "y"/);
+  assert.match(page, /⇧⌘Z\/Ctrl Y/);
   assert.match(page, /Merge boxes/);
   assert.match(page, /onUpdateRect=\{updateRect\}/);
   assert.match(page, /onDeleteFinding=\{removeFinding\}/);
@@ -115,6 +122,7 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.selection-marquee/);
   assert.match(css, /\.bulk-selection-toolbar/);
   assert.match(css, /\.exact-text-panel/);
+  assert.match(css, /\.history-button/);
   assert.match(css, /cursor:crosshair/);
 });
 
