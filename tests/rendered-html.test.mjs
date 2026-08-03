@@ -60,6 +60,8 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Stop drawing/);
   assert.match(page, /event\.key !== "Escape"/);
   assert.match(page, /Draw another box or press Esc/);
+  assert.match(page, /closest\("\.redaction-box, \.redaction-box-actions"\)/);
+  assert.match(page, /const beginEdit[\s\S]{0,350}if \(event\.button !== 0\) return;/);
   assert.match(page, /className="pdf-page-entry"/);
   assert.match(page, /onScroll=\{updatePageFromScroll\}/);
   assert.match(page, /left: draft\.x, top: draft\.y/);
@@ -76,6 +78,8 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.delete-box-action:hover/);
   assert.match(css, /\.trash-icon/);
   assert.match(css, /\.stop-drawing-button/);
+  assert.match(css, /\.pdf-page-shell\.drawing \.redaction-box\.manual \{ pointer-events:auto; \}/);
+  assert.match(css, /\.pdf-page-shell\.drawing \.redaction-box-actions\.manual-actions \{ opacity:1; pointer-events:auto; \}/);
   assert.match(css, /\.review-sidebar-toolbar/);
   assert.match(css, /cursor:crosshair/);
 });

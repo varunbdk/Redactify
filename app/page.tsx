@@ -232,6 +232,7 @@ function PdfPageView({
 
   const beginDraw = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!drawing || event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(".redaction-box, .redaction-box-actions")) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
@@ -274,7 +275,7 @@ function PdfPageView({
   };
 
   const beginEdit = (event: ReactPointerEvent<HTMLButtonElement>, findingId: string, rectIndex: number, rect: Rect) => {
-    if (drawing || event.button !== 0) return;
+    if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
