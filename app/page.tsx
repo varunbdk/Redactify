@@ -13,15 +13,25 @@ import {
 
 type Category = "PII" | "Financial" | "Identity" | "Network";
 type Phase = "hero" | "upload" | "review" | "done";
+type Confidence = "high" | "review";
 type Rect = { page: number; x: number; y: number; width: number; height: number };
 type Finding = {
   id: string;
   label: string;
   detail: string;
+  detector: string;
   kind: Category;
+  confidence: Confidence;
   selected: boolean;
   manual?: boolean;
   rects: Rect[];
+};
+type VerificationResult = {
+  passed: boolean;
+  pageCount: number;
+  extractedCharacters: number;
+  checkedRegions: number;
+  totalRegions: number;
 };
 type LocalInspection = {
   pdfType: "TextBased" | "Scanned" | "ImageBased" | "Mixed";
@@ -41,17 +51,60 @@ const categoryMeta: Record<Category, { label: string; className: string }> = {
   Network: { label: "Network", className: "meta-cyan" },
 };
 
-const rules: Array<{ kind: Category; label: string; expression: RegExp }> = [
-  { kind: "PII", label: "Email address", expression: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi },
-  { kind: "PII", label: "Phone number", expression: /(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{2,4}\)?[ .-]?)?\d{3,4}[ .-]\d{3,4}(?!\w)/g },
-  { kind: "PII", label: "Possible name", expression: /\b[A-Z][a-z]{1,30}(?:\s+[A-Z][a-z]{1,30}){1,3}\b/g },
-  { kind: "PII", label: "Street address", expression: /\b\d{1,5}\s+[A-Za-z0-9.' -]{2,55}(?:Avenue|Street|Road|Lane|Drive|Boulevard|Highway)\b/gi },
-  { kind: "Financial", label: "Card or account number", expression: /\b(?:\d[ -]*?){13,19}\b/g },
-  { kind: "Financial", label: "IBAN", expression: /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g },
-  { kind: "Identity", label: "PAN-style identity number", expression: /\b[A-Z]{5}\d{4}[A-Z]\b/g },
-  { kind: "Identity", label: "Aadhaar-style identity number", expression: /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/g },
-  { kind: "Network", label: "IP address", expression: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
-  { kind: "Network", label: "Web address", expression: /\b(?:https?:\/\/|www\.)[^\s<>()]+/gi },
+type DetectionRule = {
+  kind: Category;
+  label: string;
+  expression: RegExp;
+  confidence: Confidence;
+  assess?: (value: string) => Confidence | false;
+};
+
+const digitsOnly = (value: string) => value.replace(/\D/g, "");
+const normalizedValue = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+const isLuhnValid = (value: string) => {
+  const digits = digitsOnly(value);
+  if (digits.length < 13 || digits.length > 19 || /^(\d)\1+$/.test(digits)) return false;
+  let sum = 0;
+  let double = false;
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let digit = Number(digits[index]);
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
+};
+const isIbanValid = (value: string) => {
+  const compact = value.replace(/\s/g, "").toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact)) return false;
+  const rearranged = compact.slice(4) + compact.slice(0, 4);
+  const numeric = [...rearranged].map((character) => /\d/.test(character) ? character : String(character.charCodeAt(0) - 55)).join("");
+  let remainder = 0;
+  for (const digit of numeric) remainder = (remainder * 10 + Number(digit)) % 97;
+  return remainder === 1;
+};
+const isIpValid = (value: string) => value.split(".").every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+const isPhoneLike = (value: string) => {
+  const digits = digitsOnly(value);
+  return digits.length >= 7 && digits.length <= 15 && !/^(\d)\1+$/.test(digits);
+};
+
+const rules: DetectionRule[] = [
+  { kind: "PII", label: "Email address", expression: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, confidence: "high" },
+  { kind: "PII", label: "Phone number", expression: /(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{2,4}\)?[ .-]?)?\d{3,4}[ .-]\d{3,4}(?!\w)/g, confidence: "review", assess: (value) => isPhoneLike(value) ? "review" : false },
+  { kind: "Financial", label: "IBAN", expression: /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g, confidence: "high", assess: (value) => isIbanValid(value) ? "high" : "review" },
+  { kind: "Financial", label: "Payment card or long account number", expression: /\b(?:\d[ -]*?){13,19}\b/g, confidence: "review", assess: (value) => isLuhnValid(value) ? "high" : "review" },
+  { kind: "Financial", label: "Indian bank routing code (IFSC)", expression: /\b[A-Z]{4}0[A-Z0-9]{6}\b/g, confidence: "high" },
+  { kind: "Financial", label: "UPI payment address", expression: /\b[A-Z0-9._-]{2,}@(upi|okaxis|okhdfcbank|oksbi|ybl|paytm|ibl|axl)\b/gi, confidence: "high" },
+  { kind: "Financial", label: "Account or transaction reference", expression: /\b(?:CUST|ACCT|ACC|CARD|UPI-PS|PAY|TRF|REF|POL)[-A-Z0-9/]{5,}\b/gi, confidence: "review" },
+  { kind: "Identity", label: "PAN identity number", expression: /\b[A-Z]{5}\d{4}[A-Z]\b/g, confidence: "high" },
+  { kind: "Identity", label: "Aadhaar-style identity number", expression: /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/g, confidence: "review", assess: (value) => /^(\d)\1+$/.test(digitsOnly(value)) ? false : "review" },
+  { kind: "Identity", label: "US Social Security number", expression: /\b(?!000|666|9\d\d)\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b/g, confidence: "high" },
+  { kind: "Network", label: "IP address", expression: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, confidence: "high", assess: (value) => isIpValid(value) ? "high" : false },
+  { kind: "Network", label: "Web address", expression: /\b(?:https?:\/\/|www\.)[^\s<>()]+/gi, confidence: "high" },
 ];
 
 let pdfModule: Promise<typeof import("pdfjs-dist/legacy/build/pdf.mjs")> | null = null;
@@ -101,6 +154,7 @@ const inspectLocally = (bytes: Uint8Array) => new Promise<LocalInspection>((reso
 type PageSize = { width: number; height: number };
 type DraftRect = { x: number; y: number; width: number; height: number };
 type TextItem = { text: string; rect: Rect };
+type TextLine = { page: number; text: string; items: TextItem[] };
 type ResizeDirection = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 
 const cloneFindings = (items: Finding[]) => items.map((item) => ({
@@ -125,9 +179,109 @@ const groupTextLines = (items: TextItem[]) => {
     .sort((a, b) => a.y - b.y);
 };
 
+const textForLine = (items: TextItem[]) => items.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
+const rectsForTextRange = (items: TextItem[], start: number, length: number) => {
+  const rects: Rect[] = [];
+  let cursor = 0;
+  const end = start + length;
+  items.forEach((item, index) => {
+    const itemStart = cursor;
+    const itemEnd = itemStart + item.text.length;
+    const overlapStart = Math.max(start, itemStart);
+    const overlapEnd = Math.min(end, itemEnd);
+    if (overlapEnd > overlapStart) {
+      const leftRatio = (overlapStart - itemStart) / Math.max(item.text.length, 1);
+      const rightRatio = (overlapEnd - itemStart) / Math.max(item.text.length, 1);
+      rects.push({
+        ...item.rect,
+        x: item.rect.x + item.rect.width * leftRatio - 1,
+        width: Math.max(item.rect.width * (rightRatio - leftRatio) + 2, 8),
+      });
+    }
+    cursor = itemEnd + (index < items.length - 1 ? 1 : 0);
+  });
+  return rects;
+};
+const mergeRectsOnLine = (rects: Rect[]) => {
+  if (!rects.length) return [];
+  const page = rects[0].page;
+  const x = Math.min(...rects.map((rect) => rect.x));
+  const y = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
+  return [{ page, x, y, width: right - x, height: bottom - y }];
+};
+const mergeRectsByVisualLine = (rects: Rect[]) => {
+  const groups: Rect[][] = [];
+  for (const rect of rects) {
+    const group = groups.find((candidate) => candidate[0].page === rect.page && Math.abs(candidate[0].y - rect.y) <= Math.max(4, rect.height * .55));
+    if (group) group.push(rect);
+    else groups.push([rect]);
+  }
+  return groups.flatMap(mergeRectsOnLine);
+};
+
+const likelyName = /\b[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3}\b/g;
+const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee)\s*:?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
+const nameStopPhrases = /^(?:Private Client|Client Details|Transaction Activity|Statement Summary|Test Document|Northstar Bank|Residential Address)$/i;
+
 const addressAnchor = /\b\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square)\b[,.]?/i;
 const addressContinuation = /(?:\b[A-Z]{1,3}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b(?:apartment|apt|suite|unit|floor|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|usa|canada|australia)\b|^[A-Za-zÀ-ÿ.'’, -]{3,55}$)/i;
 const addressStop = /\b(?:transaction|date|description|amount|balance|statement|invoice|subtotal|total|iban|account|email|phone)\b/i;
+
+const canvasToPngBytes = (canvas: HTMLCanvasElement) => new Promise<Uint8Array>((resolve, reject) => {
+  canvas.toBlob(async (blob) => {
+    if (!blob) {
+      reject(new Error("The rendered page could not be encoded"));
+      return;
+    }
+    resolve(new Uint8Array(await blob.arrayBuffer()));
+  }, "image/png");
+});
+
+const darkRegionSamples = (context: CanvasRenderingContext2D, rect: Rect, width: number, height: number) => {
+  const ratios = [.25, .5, .75];
+  return ratios.every((xRatio) => ratios.every((yRatio) => {
+    const x = Math.max(0, Math.min(width - 1, Math.round(rect.x + rect.width * xRatio)));
+    const y = Math.max(0, Math.min(height - 1, Math.round(rect.y + rect.height * yRatio)));
+    const [red, green, blue, alpha] = context.getImageData(x, y, 1, 1).data;
+    return alpha > 220 && (red + green + blue) / 3 < 55;
+  }));
+};
+
+const verifyRedactedPdf = async (bytes: Uint8Array, selectedRects: Rect[], expectedPages: number): Promise<VerificationResult> => {
+  const pdfjs = await getPdf();
+  const loadingTask = pdfjs.getDocument({ data: bytes.slice() });
+  const document = await loadingTask.promise;
+  let extractedCharacters = 0;
+  let checkedRegions = 0;
+  try {
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      extractedCharacters += textContent.items.reduce((total, item) => total + ("str" in item ? item.str.trim().length : 0), 0);
+      const pageRects = selectedRects.filter((rect) => rect.page === pageNumber);
+      if (!pageRects.length) continue;
+      const viewport = page.getViewport({ scale: 1 });
+      const canvas = window.document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("Canvas unavailable during verification");
+      await page.render({ canvas, canvasContext: context, viewport }).promise;
+      checkedRegions += pageRects.filter((rect) => darkRegionSamples(context, rect, canvas.width, canvas.height)).length;
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  return {
+    passed: document.numPages === expectedPages && extractedCharacters === 0 && checkedRegions === selectedRects.length,
+    pageCount: document.numPages,
+    extractedCharacters,
+    checkedRegions,
+    totalRegions: selectedRects.length,
+  };
+};
 
 function PdfPageView({
   bytes,
@@ -135,8 +289,12 @@ function PdfPageView({
   zoom,
   findings,
   activeFindingId,
+  selectedFindingIds,
   drawing,
+  previewRedactions,
   onActivate,
+  onClearSelection,
+  onSelectMany,
   onManualRect,
   onEditStart,
   onUpdateRect,
@@ -148,8 +306,12 @@ function PdfPageView({
   zoom: number;
   findings: Finding[];
   activeFindingId: string | null;
+  selectedFindingIds: Set<string>;
   drawing: boolean;
-  onActivate: (id: string) => void;
+  previewRedactions: boolean;
+  onActivate: (id: string, additive: boolean) => void;
+  onClearSelection: () => void;
+  onSelectMany: (ids: string[], additive: boolean) => void;
   onManualRect: (rect: Rect) => void;
   onEditStart: () => void;
   onUpdateRect: (findingId: string, rectIndex: number, rect: Rect) => void;
@@ -158,8 +320,10 @@ function PdfPageView({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawStartRef = useRef<{ x: number; y: number } | null>(null);
+  const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
   const [pageSize, setPageSize] = useState<PageSize>({ width: 0, height: 0 });
   const [draft, setDraft] = useState<DraftRect | null>(null);
+  const [selectionDraft, setSelectionDraft] = useState<DraftRect | null>(null);
   const [renderError, setRenderError] = useState("");
   const editRef = useRef<{
     findingId: string;
@@ -240,6 +404,27 @@ function PdfPageView({
     setDraft({ ...point, width: 0, height: 0 });
   };
 
+  const beginSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (drawing || previewRedactions || event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(".redaction-box, .redaction-box-actions")) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = pointFromEvent(event);
+    selectionStartRef.current = point;
+    setSelectionDraft({ ...point, width: 0, height: 0 });
+    if (!event.metaKey && !event.ctrlKey) onClearSelection();
+  };
+
+  const beginOverlayInteraction = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest(".redaction-box, .redaction-box-actions")) return;
+    if (previewRedactions) {
+      if (!event.metaKey && !event.ctrlKey) onClearSelection();
+      return;
+    }
+    if (drawing) beginDraw(event);
+    else beginSelection(event);
+  };
+
   const continueDraw = (event: ReactPointerEvent<HTMLDivElement>) => {
     const start = drawStartRef.current;
     if (!drawing || !start) return;
@@ -250,6 +435,23 @@ function PdfPageView({
       width: Math.abs(point.x - start.x),
       height: Math.abs(point.y - start.y),
     });
+  };
+
+  const continueSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = selectionStartRef.current;
+    if (drawing || !start) return;
+    const point = pointFromEvent(event);
+    setSelectionDraft({
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    });
+  };
+
+  const continueOverlayInteraction = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (drawing) continueDraw(event);
+    else continueSelection(event);
   };
 
   const finishDraw = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -274,13 +476,51 @@ function PdfPageView({
     });
   };
 
+  const finishSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = selectionStartRef.current;
+    if (drawing || !start) return;
+    const point = pointFromEvent(event);
+    const finished = {
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    };
+    selectionStartRef.current = null;
+    setSelectionDraft(null);
+    if (finished.width < 6 || finished.height < 6) return;
+    const selectionRect = {
+      page: pageNumber,
+      x: finished.x / zoom,
+      y: finished.y / zoom,
+      width: finished.width / zoom,
+      height: finished.height / zoom,
+    };
+    const selectedIds = pageRects.filter(({ rect }) => (
+      rect.x < selectionRect.x + selectionRect.width
+      && rect.x + rect.width > selectionRect.x
+      && rect.y < selectionRect.y + selectionRect.height
+      && rect.y + rect.height > selectionRect.y
+    )).map(({ finding }) => finding.id);
+    onSelectMany([...new Set(selectedIds)], event.metaKey || event.ctrlKey);
+  };
+
+  const finishOverlayInteraction = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (drawing) finishDraw(event);
+    else finishSelection(event);
+  };
+
   const beginEdit = (event: ReactPointerEvent<HTMLButtonElement>, findingId: string, rectIndex: number, rect: Rect) => {
-    if (event.button !== 0) return;
+    if (previewRedactions || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey) {
+      event.stopPropagation();
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     onEditStart();
-    onActivate(findingId);
+    onActivate(findingId, false);
     const requestedHandle = (event.target as HTMLElement).dataset.handle;
     editRef.current = {
       findingId,
@@ -303,7 +543,7 @@ function PdfPageView({
     const dy = (event.clientY - edit.clientY) / zoom;
     const maxWidth = pageSize.width / zoom;
     const maxHeight = pageSize.height / zoom;
-    let next = { ...edit.original };
+    const next = { ...edit.original };
     if (edit.mode === "move") {
       next.x = Math.max(0, Math.min(maxWidth - edit.original.width, edit.original.x + dx));
       next.y = Math.max(0, Math.min(maxHeight - edit.original.height, edit.original.y + dy));
@@ -336,7 +576,7 @@ function PdfPageView({
   );
 
   return <div
-    className={`pdf-page-shell ${drawing ? "drawing" : ""}`}
+    className={`pdf-page-shell ${drawing ? "drawing" : ""} ${previewRedactions ? "preview-redactions" : ""}`}
     style={pageSize.width ? { width: pageSize.width, height: pageSize.height } : undefined}
   >
     <canvas ref={canvasRef} aria-label={`PDF page ${pageNumber}`} />
@@ -344,15 +584,15 @@ function PdfPageView({
     {renderError && <div className="page-loading error">{renderError}</div>}
     {pageSize.width > 0 && <div
       className="pdf-overlay"
-      onPointerDown={beginDraw}
-      onPointerMove={continueDraw}
-      onPointerUp={finishDraw}
-      onPointerCancel={() => { drawStartRef.current = null; setDraft(null); }}
+      onPointerDown={beginOverlayInteraction}
+      onPointerMove={continueOverlayInteraction}
+      onPointerUp={finishOverlayInteraction}
+      onPointerCancel={() => { drawStartRef.current = null; selectionStartRef.current = null; setDraft(null); setSelectionDraft(null); }}
     >
       {pageRects.map(({ finding, rect, index }) => <Fragment key={`${finding.id}-${index}`}>
         <button
           type="button"
-          className={`redaction-box ${finding.selected ? "will-redact" : "will-keep"} ${finding.manual ? "manual" : ""} ${activeFindingId === finding.id ? "active" : ""}`}
+          className={`redaction-box ${finding.selected ? "will-redact" : "will-keep"} ${finding.manual ? "manual" : ""} ${activeFindingId === finding.id ? "active" : ""} ${selectedFindingIds.has(finding.id) ? "bulk-selected" : ""}`}
           style={{
             left: rect.x * zoom,
             top: rect.y * zoom,
@@ -363,14 +603,14 @@ function PdfPageView({
           onPointerMove={continueEdit}
           onPointerUp={(event) => { event.stopPropagation(); editRef.current = null; }}
           onPointerCancel={() => { editRef.current = null; }}
-          onClick={() => onActivate(finding.id)}
+          onClick={(event) => { event.stopPropagation(); onActivate(finding.id, event.metaKey || event.ctrlKey); }}
           title={`${finding.selected ? "Will redact" : "Will keep"}: ${finding.label}`}
           aria-label={`${finding.selected ? "Redact" : "Keep"} ${finding.label}`}
         >
           {(["n", "ne", "e", "se", "s", "sw", "w", "nw"] as ResizeDirection[]).map((direction) =>
             <span key={direction} className={`resize-handle handle-${direction}`} data-handle={direction} aria-hidden="true" />)}
         </button>
-        {activeFindingId === finding.id && <div
+        {!previewRedactions && activeFindingId === finding.id && selectedFindingIds.size === 1 && <div
           className={`redaction-box-actions ${finding.manual ? "manual-actions" : "detected-actions"}`}
           style={{ left: (rect.x + rect.width) * zoom - (finding.manual ? 34 : 70), top: rect.y * zoom - 38 }}
         >
@@ -393,6 +633,7 @@ function PdfPageView({
         </div>}
       </Fragment>)}
       {draft && <span className="redaction-draft" style={{ left: draft.x, top: draft.y, width: draft.width, height: draft.height }} />}
+      {selectionDraft && <span className="selection-marquee" style={{ left: selectionDraft.x, top: selectionDraft.y, width: selectionDraft.width, height: selectionDraft.height }} />}
     </div>}
   </div>;
 }
@@ -400,8 +641,9 @@ function PdfPageView({
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const historyRef = useRef<Finding[][]>([]);
+  const exportedPdfRef = useRef<Uint8Array | null>(null);
+  const occurrenceRef = useRef(new Map<string, number>());
   const stageRef = useRef<HTMLDivElement>(null);
-  const pageEntryRefs = useRef(new Map<number, HTMLDivElement>());
   const [phase, setPhase] = useState<Phase>("hero");
   const [dragging, setDragging] = useState(false);
   const [fileName, setFileName] = useState("");
@@ -410,15 +652,23 @@ export default function Home() {
   const [analyzing, setAnalyzing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [extractedLines, setExtractedLines] = useState<TextLine[]>([]);
+  const [customTerms, setCustomTerms] = useState("");
   const [filter, setFilter] = useState<Category | "All">("All");
   const [message, setMessage] = useState("");
   const [activePage, setActivePage] = useState(1);
   const [zoom, setZoom] = useState(1);
   const [drawing, setDrawing] = useState(false);
+  const [previewRedactions, setPreviewRedactions] = useState(false);
   const [activeFindingId, setActiveFindingId] = useState<string | null>(null);
+  const [selectedFindingIds, setSelectedFindingIds] = useState<Set<string>>(() => new Set());
   const [inspection, setInspection] = useState<LocalInspection | null>(null);
+  const [verification, setVerification] = useState<VerificationResult | null>(null);
+  const [canUndo, setCanUndo] = useState(false);
 
   const selectedCount = findings.filter((finding) => finding.selected).length;
+  const bulkSelectionCount = selectedFindingIds.size;
+  const reviewCount = findings.filter((finding) => finding.confidence === "review").length;
   const filteredFindings = useMemo(
     () => filter === "All" ? findings : findings.filter((finding) => finding.kind === filter),
     [filter, findings],
@@ -430,7 +680,7 @@ export default function Home() {
     setActivePage(page);
     window.requestAnimationFrame(() => {
       const stage = stageRef.current;
-      const entry = pageEntryRefs.current.get(page);
+      const entry = stage?.querySelector<HTMLElement>(`[data-page="${page}"]`);
       if (!stage || !entry) return;
       const stageBounds = stage.getBoundingClientRect();
       const entryBounds = entry.getBoundingClientRect();
@@ -445,7 +695,8 @@ export default function Home() {
     const focusLine = stageBounds.top + Math.min(stage.clientHeight * .35, 260);
     let closestPage = activePage;
     let closestDistance = Number.POSITIVE_INFINITY;
-    pageEntryRefs.current.forEach((entry, page) => {
+    stage.querySelectorAll<HTMLElement>("[data-page]").forEach((entry) => {
+      const page = Number(entry.dataset.page);
       const bounds = entry.getBoundingClientRect();
       const distance = Math.abs(bounds.top - focusLine);
       if (distance < closestDistance) {
@@ -461,6 +712,7 @@ export default function Home() {
 
   const checkpoint = () => {
     historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+    setCanUndo(true);
   };
 
   const undo = () => {
@@ -468,6 +720,9 @@ export default function Home() {
     if (!previous) return;
     historyRef.current = historyRef.current.slice(0, -1);
     setFindings(previous);
+    setActiveFindingId(null);
+    setSelectedFindingIds(new Set());
+    setCanUndo(historyRef.current.length > 0);
     setMessage("Last redaction edit undone.");
   };
 
@@ -477,15 +732,43 @@ export default function Home() {
   }, [activeFindingId]);
 
   useEffect(() => {
-    if (!drawing) return;
-    const stopDrawingWithEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setDrawing(false);
-      setMessage("Drawing mode stopped.");
+    const handleEditorKeys = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, [contenteditable='true']")) return;
+      if (event.key === "Escape") {
+        if (drawing) {
+          setDrawing(false);
+          setMessage("Drawing mode stopped.");
+        } else {
+          setActiveFindingId(null);
+          setSelectedFindingIds(new Set());
+        }
+        return;
+      }
+      if ((event.key !== "Delete" && event.key !== "Backspace") || !selectedFindingIds.size) return;
+      event.preventDefault();
+      historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+      setCanUndo(true);
+      setFindings((items) => items.filter((item) => !selectedFindingIds.has(item.id)));
+      setActiveFindingId(null);
+      setSelectedFindingIds(new Set());
+      setMessage(`${selectedFindingIds.size} selected ${selectedFindingIds.size === 1 ? "box" : "boxes"} deleted.`);
     };
-    window.addEventListener("keydown", stopDrawingWithEscape);
-    return () => window.removeEventListener("keydown", stopDrawingWithEscape);
-  }, [drawing]);
+    window.addEventListener("keydown", handleEditorKeys);
+    return () => window.removeEventListener("keydown", handleEditorKeys);
+  }, [drawing, findings, selectedFindingIds]);
+
+  useEffect(() => {
+    if (!activeFindingId) return;
+    const clearControlsOutsideFinding = (event: globalThis.PointerEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest(".redaction-box, .redaction-box-actions, .suggestion-card, .bulk-selection-toolbar")) return;
+      setActiveFindingId(null);
+      if (selectedFindingIds.size <= 1) setSelectedFindingIds(new Set());
+    };
+    window.addEventListener("pointerdown", clearControlsOutsideFinding, true);
+    return () => window.removeEventListener("pointerdown", clearControlsOutsideFinding, true);
+  }, [activeFindingId, selectedFindingIds.size]);
 
   const analyzeFile = async (file?: File) => {
     if (!file) return;
@@ -500,13 +783,21 @@ export default function Home() {
     setPhase("upload");
     setFileName(file.name);
     setFindings([]);
+    setExtractedLines([]);
+    setCustomTerms("");
     setMessage("");
     setActivePage(1);
     setZoom(1);
     setDrawing(false);
+    setPreviewRedactions(false);
     setActiveFindingId(null);
+    setSelectedFindingIds(new Set());
     setInspection(null);
+    setVerification(null);
+    exportedPdfRef.current = null;
+    occurrenceRef.current.clear();
     historyRef.current = [];
+    setCanUndo(false);
     setAnalyzing(true);
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -520,6 +811,41 @@ export default function Home() {
       const pdfDocument = await loadingTask.promise;
       setPageCount(pdfDocument.numPages);
       const found = new Map<string, Finding>();
+      const documentLines: TextLine[] = [];
+      const registerFinding = ({
+        label,
+        detector,
+        kind,
+        confidence,
+        page,
+        rects,
+      }: {
+        label: string;
+        detector: string;
+        kind: Category;
+        confidence: Confidence;
+        page: number;
+        rects: Rect[];
+      }) => {
+        if (!rects.length || !normalizedValue(label)) return;
+        const key = `${kind}:${detector}:${normalizedValue(label)}`;
+        const existing = found.get(key);
+        if (existing) {
+          existing.rects.push(...rects);
+          if (confidence === "high") existing.confidence = "high";
+          return;
+        }
+        found.set(key, {
+          id: crypto.randomUUID(),
+          label,
+          detail: `${detector} · Page ${page}`,
+          detector,
+          kind,
+          confidence,
+          selected: confidence === "high",
+          rects,
+        });
+      };
       for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
         const page = await pdfDocument.getPage(pageNumber);
         const viewport = page.getViewport({ scale: 1 });
@@ -539,55 +865,88 @@ export default function Home() {
             height: itemHeight + 2,
           };
           pageItems.push({ text: item.str, rect: wholeRect });
-          for (const rule of rules.filter((candidate) => candidate.label !== "Street address")) {
-            rule.expression.lastIndex = 0;
-            for (const match of item.str.matchAll(rule.expression)) {
-              const value = match[0];
-              const key = `${rule.kind}:${value.toLowerCase()}`;
-              const leftRatio = (match.index || 0) / Math.max(item.str.length, 1);
-              const rightRatio = ((match.index || 0) + value.length) / Math.max(item.str.length, 1);
-              const rect: Rect = {
-                page: pageNumber,
-                x: transform[4] + itemWidth * leftRatio - 1,
-                y: viewport.height - transform[5] - itemHeight - 1,
-                width: Math.max(itemWidth * (rightRatio - leftRatio) + 2, 8),
-                height: itemHeight + 2,
-              };
-              const existing = found.get(key);
-              if (existing) existing.rects.push(rect);
-              else found.set(key, {
-                id: crypto.randomUUID(), label: value,
-                detail: `${rule.label} · Page ${pageNumber}`,
-                kind: rule.kind, selected: true, rects: [rect],
-              });
-            }
-          }
         }
 
         const lines = groupTextLines(pageItems);
+        documentLines.push(...lines.map((line) => ({ page: pageNumber, text: textForLine(line.items), items: line.items })));
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
           const line = lines[lineIndex];
-          const lineText = line.items.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
-          if (!addressAnchor.test(lineText)) continue;
+          const lineText = textForLine(line.items);
+          for (const rule of rules) {
+            rule.expression.lastIndex = 0;
+            for (const match of lineText.matchAll(rule.expression)) {
+              const value = match[0];
+              const confidence = rule.assess?.(value) ?? rule.confidence;
+              if (!confidence) continue;
+              registerFinding({
+                label: value,
+                detector: rule.label,
+                kind: rule.kind,
+                confidence,
+                page: pageNumber,
+                rects: mergeRectsOnLine(rectsForTextRange(line.items, match.index || 0, value.length)),
+              });
+            }
+          }
+          const labelledMatch = labelledName.exec(lineText);
+          if (labelledMatch) {
+            const name = labelledMatch[1];
+            const nameStart = (labelledMatch.index || 0) + labelledMatch[0].lastIndexOf(name);
+            registerFinding({
+              label: name,
+              detector: "Labelled person name",
+              kind: "PII",
+              confidence: "high",
+              page: pageNumber,
+              rects: mergeRectsOnLine(rectsForTextRange(line.items, nameStart, name.length)),
+            });
+          } else {
+            likelyName.lastIndex = 0;
+            for (const match of lineText.matchAll(likelyName)) {
+              const name = match[0];
+              if (nameStopPhrases.test(name)) continue;
+              registerFinding({
+                label: name,
+                detector: "Possible person or organization name",
+                kind: "PII",
+                confidence: "review",
+                page: pageNumber,
+                rects: mergeRectsOnLine(rectsForTextRange(line.items, match.index || 0, name.length)),
+              });
+            }
+          }
+
+          const addressMatch = addressAnchor.exec(lineText);
+          if (!addressMatch) continue;
+          const addressStart = addressMatch.index || 0;
+          const matchedEnd = addressStart + addressMatch[0].length;
+          const inlineTail = lineText.slice(matchedEnd).trim();
+          const includeInlineTail = inlineTail.length > 0 && inlineTail.length <= 100 && !addressStop.test(inlineTail) && addressContinuation.test(inlineTail);
+          const firstAddressEnd = includeInlineTail ? lineText.length : matchedEnd;
           const addressLines = [line];
           let previous = line;
           for (let offset = 1; offset <= 3 && lineIndex + offset < lines.length; offset += 1) {
             const candidate = lines[lineIndex + offset];
-            const candidateText = candidate.items.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
+            const candidateText = textForLine(candidate.items);
             const gap = candidate.y - (previous.y + previous.height);
             if (gap > Math.max(18, previous.height * 1.8) || addressStop.test(candidateText) || !addressContinuation.test(candidateText)) break;
             addressLines.push(candidate);
             previous = candidate;
           }
-          const value = addressLines.map((addressLine) => addressLine.items.map((item) => item.text).join(" ").trim()).join(", ");
-          const key = `PII:address:${pageNumber}:${lineIndex}`;
-          found.set(key, {
-            id: crypto.randomUUID(),
+          const firstAddress = lineText.slice(addressStart, firstAddressEnd).trim();
+          const continuationText = addressLines.slice(1).map((addressLine) => textForLine(addressLine.items));
+          const value = [firstAddress, ...continuationText].join(", ");
+          const addressRects = [
+            ...mergeRectsOnLine(rectsForTextRange(line.items, addressStart, firstAddressEnd - addressStart)),
+            ...addressLines.slice(1).flatMap((addressLine) => mergeRectsOnLine(addressLine.items.map((item) => ({ ...item.rect })))),
+          ];
+          registerFinding({
             label: value,
-            detail: `Complete address · Page ${pageNumber}`,
+            detector: "Complete address",
             kind: "PII",
-            selected: true,
-            rects: addressLines.flatMap((addressLine) => addressLine.items.map((item) => ({ ...item.rect }))),
+            confidence: "high",
+            page: pageNumber,
+            rects: addressRects,
           });
           lineIndex += addressLines.length - 1;
         }
@@ -596,10 +955,11 @@ export default function Home() {
       setInspection(localInspection);
       await loadingTask.destroy();
       setFindings([...found.values()]);
+      setExtractedLines(documentLines);
       if (localInspection?.pagesNeedingOcr.length) {
-        setMessage(`Local analysis complete. ${localInspection.pagesNeedingOcr.length} ${localInspection.pagesNeedingOcr.length === 1 ? "page needs" : "pages need"} OCR before all content can be checked.`);
+        setMessage(`Local analysis complete. ${localInspection.pagesNeedingOcr.length} ${localInspection.pagesNeedingOcr.length === 1 ? "page has" : "pages have"} no readable text layer; review those pages manually.`);
       } else {
-        setMessage(found.size ? "Analysis complete. Your document never left this browser." : "No common sensitive patterns were found.");
+        setMessage(found.size ? "Analysis complete. High-confidence matches are selected; uncertain matches are marked for review." : "No common sensitive patterns were found.");
       }
       setPhase("review");
     } catch (error) {
@@ -611,20 +971,32 @@ export default function Home() {
     }
   };
 
+  const downloadPdfBytes = (bytes: Uint8Array) => {
+    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/pdf" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = fileName.replace(/\.pdf$/i, "") + "-redacted.pdf";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+  };
+
   const createRedactedPdf = async () => {
     if (!fileBytes || !selectedCount) return;
     const selected = findings.filter((finding) => finding.selected);
+    const selectedRects = selected.flatMap((finding) => finding.rects);
     setCreating(true);
-    setMessage("Creating a flattened redacted PDF on your device…");
+    setVerification(null);
+    setMessage("Creating and independently verifying a flattened PDF on your device…");
     try {
       const [{ PDFDocument }, pdfjs] = await Promise.all([import("pdf-lib"), getPdf()]);
       const loadingTask = pdfjs.getDocument({ data: fileBytes.slice() });
       const source = await loadingTask.promise;
       const output = await PDFDocument.create();
-      const scale = 1.7;
+      const renderScale = 2;
       for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
         const page = await source.getPage(pageNumber);
-        const viewport = page.getViewport({ scale });
+        const pageSize = page.getViewport({ scale: 1 });
+        const viewport = page.getViewport({ scale: renderScale });
         const canvas = document.createElement("canvas");
         canvas.width = Math.ceil(viewport.width);
         canvas.height = Math.ceil(viewport.height);
@@ -632,24 +1004,33 @@ export default function Home() {
         if (!context) throw new Error("Canvas unavailable");
         await page.render({ canvas, canvasContext: context, viewport }).promise;
         context.fillStyle = "#111018";
-        selected.flatMap((finding) => finding.rects).filter((rect) => rect.page === pageNumber).forEach((rect) => {
-          context.fillRect(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
+        selectedRects.filter((rect) => rect.page === pageNumber).forEach((rect) => {
+          const safetyPadding = 1.5;
+          context.fillRect(
+            Math.max(0, (rect.x - safetyPadding) * renderScale),
+            Math.max(0, (rect.y - safetyPadding) * renderScale),
+            Math.min(pageSize.width - rect.x + safetyPadding, rect.width + safetyPadding * 2) * renderScale,
+            Math.min(pageSize.height - rect.y + safetyPadding, rect.height + safetyPadding * 2) * renderScale,
+          );
         });
-        const pngBytes = new Uint8Array(await (await fetch(canvas.toDataURL("image/png"))).arrayBuffer());
+        const pngBytes = await canvasToPngBytes(canvas);
         const image = await output.embedPng(pngBytes);
-        output.addPage([viewport.width / scale, viewport.height / scale]).drawImage(image, {
-          x: 0, y: 0, width: viewport.width / scale, height: viewport.height / scale,
+        output.addPage([pageSize.width, pageSize.height]).drawImage(image, {
+          x: 0, y: 0, width: pageSize.width, height: pageSize.height,
         });
       }
       await loadingTask.destroy();
       const redactedBytes = Uint8Array.from(await output.save());
-      const blob = new Blob([redactedBytes.buffer], { type: "application/pdf" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = fileName.replace(/\.pdf$/i, "") + "-redacted.pdf";
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-      setMessage("Your flattened redacted PDF was downloaded locally.");
+      const result = await verifyRedactedPdf(redactedBytes, selectedRects, pageCount);
+      setVerification(result);
+      if (!result.passed) {
+        exportedPdfRef.current = null;
+        setMessage("Safety verification did not pass, so no file was downloaded. Review the boxes and try again.");
+        return;
+      }
+      exportedPdfRef.current = redactedBytes;
+      downloadPdfBytes(redactedBytes);
+      setMessage("Verified: the new PDF contains no extractable source text and every approved region is burned in.");
       setPhase("done");
     } catch (error) {
       console.error(error);
@@ -659,20 +1040,139 @@ export default function Home() {
     }
   };
 
+  const downloadLastExport = () => {
+    if (exportedPdfRef.current) downloadPdfBytes(exportedPdfRef.current);
+  };
+
   const reset = () => {
     setPhase("upload"); setFileName(""); setFileBytes(null); setPageCount(0);
-    setFindings([]); setFilter("All"); setMessage(""); setActivePage(1);
-    setZoom(1); setDrawing(false); setActiveFindingId(null);
-    setInspection(null);
+    setFindings([]); setExtractedLines([]); setCustomTerms(""); setFilter("All"); setMessage(""); setActivePage(1);
+    setZoom(1); setDrawing(false); setPreviewRedactions(false); setActiveFindingId(null); setSelectedFindingIds(new Set());
+    setInspection(null); setVerification(null);
+    exportedPdfRef.current = null;
+    occurrenceRef.current.clear();
     historyRef.current = [];
+    setCanUndo(false);
   };
   const toggle = (id: string, selected: boolean) => { checkpoint(); setFindings((items) => items.map((item) => item.id === id ? { ...item, selected } : item)); };
   const acceptAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: true }))); };
   const rejectAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: false }))); };
+  const activateFinding = (id: string, additive: boolean) => {
+    if (!additive) {
+      setSelectedFindingIds(new Set([id]));
+      setActiveFindingId(id);
+      return;
+    }
+    setSelectedFindingIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      setActiveFindingId(next.size === 1 ? [...next][0] : null);
+      return next;
+    });
+  };
+  const clearFindingSelection = () => {
+    setActiveFindingId(null);
+    setSelectedFindingIds(new Set());
+  };
+  const selectManyFindings = (ids: string[], additive: boolean) => {
+    setSelectedFindingIds((current) => {
+      const next = additive ? new Set(current) : new Set<string>();
+      ids.forEach((id) => next.add(id));
+      setActiveFindingId(next.size === 1 ? [...next][0] : null);
+      return next;
+    });
+    if (ids.length) setMessage(`${ids.length} ${ids.length === 1 ? "box" : "boxes"} selected. Approve or delete them together.`);
+  };
+  const approveSelectedFindings = () => {
+    if (!selectedFindingIds.size) return;
+    checkpoint();
+    setFindings((items) => items.map((item) => selectedFindingIds.has(item.id) ? { ...item, selected: true } : item));
+    setMessage(`${selectedFindingIds.size} selected ${selectedFindingIds.size === 1 ? "box is" : "boxes are"} approved for redaction.`);
+  };
+  const deleteSelectedFindings = () => {
+    if (!selectedFindingIds.size) return;
+    const count = selectedFindingIds.size;
+    checkpoint();
+    setFindings((items) => items.filter((item) => !selectedFindingIds.has(item.id)));
+    clearFindingSelection();
+    setMessage(`${count} selected ${count === 1 ? "box" : "boxes"} deleted.`);
+  };
   const showFinding = (finding: Finding) => {
+    occurrenceRef.current.set(finding.id, 0);
     const page = finding.rects[0]?.page;
     if (page) goToPage(page);
-    setActiveFindingId(finding.id);
+    activateFinding(finding.id, false);
+  };
+  const showNextOccurrence = (finding: Finding) => {
+    const current = occurrenceRef.current.get(finding.id) ?? 0;
+    const next = (current + 1) % finding.rects.length;
+    occurrenceRef.current.set(finding.id, next);
+    const page = finding.rects[next]?.page;
+    if (page) goToPage(page);
+    activateFinding(finding.id, false);
+    setMessage(`Showing occurrence ${next + 1} of ${finding.rects.length}.`);
+  };
+  const selectSimilar = (finding: Finding) => {
+    checkpoint();
+    const matching = findings.filter((item) => !item.manual && item.detector === finding.detector);
+    setFindings((items) => items.map((item) => item.manual || item.detector !== finding.detector ? item : { ...item, selected: true }));
+    setMessage(`${matching.length} ${finding.detector.toLowerCase()} ${matching.length === 1 ? "finding" : "findings"} selected.`);
+  };
+  const findAndRedactCustomText = () => {
+    const terms = [...new Set(customTerms.split(/\r?\n/).map((term) => term.replace(/\s+/g, " ").trim()).filter(Boolean))].slice(0, 50);
+    if (!terms.length) {
+      setMessage("Enter at least one word, number, or sentence to find.");
+      return;
+    }
+    const customFindings: Finding[] = [];
+    const pageItems = new Map<number, TextItem[]>();
+    extractedLines.forEach((line) => pageItems.set(line.page, [
+      ...(pageItems.get(line.page) || []),
+      ...line.items.map((item) => ({ ...item, text: item.text.replace(/\s+/g, " ") })),
+    ]));
+    for (const term of terms) {
+      const rects: Rect[] = [];
+      const needle = term.toLocaleLowerCase();
+      for (const items of pageItems.values()) {
+        const haystack = items.map((item) => item.text).join(" ").toLocaleLowerCase();
+        let start = 0;
+        while (start <= haystack.length - needle.length) {
+          const matchIndex = haystack.indexOf(needle, start);
+          if (matchIndex < 0) break;
+          rects.push(...mergeRectsByVisualLine(rectsForTextRange(items, matchIndex, term.length)));
+          start = matchIndex + Math.max(needle.length, 1);
+        }
+      }
+      if (rects.length) {
+        customFindings.push({
+          id: crypto.randomUUID(),
+          label: term,
+          detail: `Custom exact text · Page ${rects[0].page}`,
+          detector: "Custom exact text",
+          kind: "PII",
+          confidence: "high",
+          selected: true,
+          rects,
+        });
+      }
+    }
+    if (!customFindings.length) {
+      setMessage("None of the entered text was found in this PDF's readable text layer.");
+      return;
+    }
+    checkpoint();
+    const replacedKeys = new Set(customFindings.map((finding) => normalizedValue(finding.label)));
+    setFindings((items) => [
+      ...items.filter((item) => item.detector !== "Custom exact text" || !replacedKeys.has(normalizedValue(item.label))),
+      ...customFindings,
+    ]);
+    setFilter("All");
+    const ids = new Set(customFindings.map((finding) => finding.id));
+    setSelectedFindingIds(ids);
+    setActiveFindingId(ids.size === 1 ? [...ids][0] : null);
+    const occurrenceCount = customFindings.reduce((total, finding) => total + finding.rects.length, 0);
+    setMessage(`${occurrenceCount} ${occurrenceCount === 1 ? "occurrence" : "occurrences"} found and selected for redaction.`);
   };
   const addManualRect = (rect: Rect) => {
     checkpoint();
@@ -681,18 +1181,25 @@ export default function Home() {
       id,
       label: "Manual redaction",
       detail: `Manual selection · Page ${rect.page}`,
+      detector: "Manual selection",
       kind: "PII",
+      confidence: "high",
       selected: true,
       manual: true,
       rects: [rect],
     }]);
     setFilter("All");
-    setActiveFindingId(id);
+    activateFinding(id, false);
     setMessage(`Manual redaction added to page ${rect.page}. Draw another box or press Esc when finished.`);
   };
   const removeFinding = (id: string) => {
     checkpoint();
     setFindings((items) => items.filter((item) => item.id !== id));
+    setSelectedFindingIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
     if (activeFindingId === id) setActiveFindingId(null);
   };
   const updateRect = (findingId: string, rectIndex: number, rect: Rect) => {
@@ -775,7 +1282,10 @@ export default function Home() {
               <span>{Math.round(zoom * 100)}%</span>
               <button type="button" onClick={() => setZoom((value) => Math.min(1.75, Number((value + .15).toFixed(2))))} disabled={zoom >= 1.75} aria-label="Zoom in">+</button>
             </div>
-            <button type="button" className={`draw-button ${drawing ? "active" : ""}`} onClick={() => setDrawing(true)} aria-pressed={drawing} disabled={drawing}>
+            <button type="button" className={`preview-button ${previewRedactions ? "active" : ""}`} onClick={() => { setPreviewRedactions((value) => !value); setDrawing(false); clearFindingSelection(); }} aria-pressed={previewRedactions}>
+              {previewRedactions ? "Exit preview" : "Preview redactions"}
+            </button>
+            <button type="button" className={`draw-button ${drawing ? "active" : ""}`} onClick={() => { setDrawing(true); setPreviewRedactions(false); }} aria-pressed={drawing} disabled={drawing}>
               {drawing ? "Drawing mode on" : "+ Draw redaction"}
             </button>
             {drawing && <button type="button" className="stop-drawing-button" onClick={() => { setDrawing(false); setMessage("Drawing mode stopped."); }}>
@@ -783,11 +1293,18 @@ export default function Home() {
             </button>}
           </div>
           {drawing && <div className="draw-help" role="status">Draw as many boxes as you need. Press Esc or “Stop drawing” when you are finished.</div>}
+          {bulkSelectionCount > 1 && <div className="bulk-selection-toolbar" role="toolbar" aria-label="Selected redaction boxes">
+            <strong>{bulkSelectionCount} {bulkSelectionCount === 1 ? "box" : "boxes"} selected</strong>
+            <span>Drag around boxes or use ⌘/Ctrl-click to add more.</span>
+            <button type="button" className="bulk-approve" onClick={approveSelectedFindings}>✓ Approve selected</button>
+            <button type="button" className="bulk-delete" onClick={deleteSelectedFindings}><span className="trash-icon" aria-hidden="true" /> Delete selected</button>
+            <button type="button" onClick={clearFindingSelection}>Clear</button>
+          </div>}
           {inspection && <div className={`inspection-strip ${inspection.pagesNeedingOcr.length ? "needs-ocr" : "ready"}`}>
             <span>LOCAL RUST/WASM INSPECTOR</span>
             <strong>{inspection.pdfType.replace(/([a-z])([A-Z])/g, "$1 $2")}</strong>
             <small>{inspection.pagesNeedingOcr.length
-              ? `OCR recommended for ${inspection.pagesNeedingOcr.map((page) => `p.${page}`).join(", ")}`
+              ? `Manual review needed for ${inspection.pagesNeedingOcr.map((page) => `p.${page}`).join(", ")}`
               : `All ${inspection.pageCount} pages contain extractable text`}</small>
             {inspection.layout.isComplex && <small>Complex layout detected</small>}
           </div>}
@@ -796,7 +1313,6 @@ export default function Home() {
               className="pdf-page-entry"
               key={`${pageNumber}-${zoom}`}
               data-page={pageNumber}
-              ref={(node) => { if (node) pageEntryRefs.current.set(pageNumber, node); else pageEntryRefs.current.delete(pageNumber); }}
             >
               <div className="pdf-page-number">Page {pageNumber}</div>
               <PdfPageView
@@ -805,8 +1321,12 @@ export default function Home() {
                 zoom={zoom}
                 findings={findings}
                 activeFindingId={activeFindingId}
+                selectedFindingIds={selectedFindingIds}
                 drawing={drawing}
-                onActivate={setActiveFindingId}
+                previewRedactions={previewRedactions}
+                onActivate={activateFinding}
+                onClearSelection={clearFindingSelection}
+                onSelectMany={selectManyFindings}
                 onManualRect={addManualRect}
                 onEditStart={checkpoint}
                 onUpdateRect={updateRect}
@@ -815,20 +1335,36 @@ export default function Home() {
               />
             </div>)}
           </div>
-          <div className="viewer-legend"><span><i className="legend-redact" /> Will redact</span><span><i className="legend-keep" /> Will keep</span><span><i className="legend-manual" /> Manual</span></div>
+          <div className="viewer-legend"><span><i className="legend-redact" /> Will redact</span><span><i className="legend-keep" /> Will keep</span><span><i className="legend-manual" /> Manual</span><span className="selection-hint">Drag to multi-select · ⌘/Ctrl-click to add boxes · Delete key to remove</span></div>
           <div className="privacy-card"><span>⌁</span><div><strong>This view is local.</strong><p>The PDF page, your manual boxes, PDF.js extraction, and pdf-inspector WASM analysis remain in this browser tab.</p></div></div>
         </div>
         <aside className="suggestions-panel">
           <div className="review-sidebar-toolbar">
             <div className="file-summary"><span className="file-icon">PDF</span><div><strong>{fileName}</strong><small>{findings.length} findings · {pageCount} {pageCount === 1 ? "page" : "pages"}</small></div></div>
             <div className="decision-summary"><span>{selectedCount} selected</span><i /><span>{findings.length - selectedCount} kept</span></div>
+            {reviewCount > 0 && <div className="review-alert"><strong>{reviewCount} uncertain</strong><span>Check these suggestions before export.</span></div>}
             <div className="sidebar-actions">
-              <button className="mini-button" onClick={undo} disabled={!historyRef.current.length}>↶ Undo</button>
+              <button className="mini-button" onClick={undo} disabled={!canUndo}>↶ Undo</button>
               <button className="mini-button accept" onClick={acceptAll}>Redact all</button>
               <button className="mini-button" onClick={rejectAll}>Keep all</button>
             </div>
             <button className="primary-button compact sidebar-export" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? "Creating…" : "Apply & export"} <b>→</b></button>
           </div>
+          <section className="exact-text-panel">
+            <div><strong>Find exact text</strong><span>Local search</span></div>
+            <p>Enter one word, number, or sentence per line. Every exact match will be selected for redaction.</p>
+            <textarea
+              value={customTerms}
+              onChange={(event) => setCustomTerms(event.target.value)}
+              onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") findAndRedactCustomText(); }}
+              placeholder={"Aarav Mehta\nGB82 WEST 1234 5698 7654 32\nConfidential project name"}
+              maxLength={2000}
+              rows={3}
+              aria-label="Text to find and redact"
+            />
+            <button type="button" onClick={findAndRedactCustomText} disabled={!customTerms.trim() || !extractedLines.length}>Find & redact all matches</button>
+            <small>Case-insensitive · Up to 50 lines · ⌘/Ctrl + Enter</small>
+          </section>
           <div className="suggestion-head">
             <div className="panel-label"><span><b /> REVIEW FINDINGS</span></div>
             <div className="filter-row"><button className={filter === "All" ? "active" : ""} onClick={() => setFilter("All")}>All</button>{usedCategories.map((kind) => <button key={kind} className={filter === kind ? `active ${categoryMeta[kind].className}` : ""} onClick={() => setFilter(kind)}>{categoryMeta[kind].label}</button>)}</div>
@@ -836,17 +1372,22 @@ export default function Home() {
           <div className="suggestion-list">
             {filteredFindings.map((finding, index) => <article
               id={`finding-${finding.id}`}
-              className={`suggestion-card ${finding.selected ? "selected" : "kept"} ${activeFindingId === finding.id ? "active" : ""}`}
+              className={`suggestion-card ${finding.selected ? "selected" : "kept"} ${activeFindingId === finding.id ? "active" : ""} ${selectedFindingIds.has(finding.id) ? "bulk-active" : ""}`}
               key={finding.id}
               style={{ animationDelay: `${Math.min(index * 35, 350)}ms` }}
-              onClick={() => showFinding(finding)}
+              onClick={(event) => {
+                if (event.metaKey || event.ctrlKey) activateFinding(finding.id, true);
+                else showFinding(finding);
+              }}
             >
-              <div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.manual ? "MANUAL" : finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.rects.length > 1 ? ` · ${finding.rects.length} matches` : ""}</small><button type="button" className="locate-button" onClick={() => showFinding(finding)}>View</button></div>
+              <div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.manual ? "MANUAL" : finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.rects.length > 1 ? ` · ${finding.rects.length} matches` : ""}</small><span className={`confidence-badge ${finding.confidence}`}>{finding.confidence === "high" ? "VALIDATED" : "CHECK"}</span><button type="button" className="locate-button" onClick={(event) => { event.stopPropagation(); showFinding(finding); }}>Jump to match</button></div>
               <code>{finding.label}</code>
-              <p>{finding.manual ? "Drawn by you on the real PDF page." : "Detected locally from the PDF text layer."} Drag the box to move it; drag any edge or corner to resize it.</p>
+              <p>{finding.manual ? "Drawn by you on the real PDF page." : finding.confidence === "high" ? "Pattern and format checks passed locally." : "Possible sensitive data — confirm this suggestion before redacting."} Drag the box to move it; drag any edge or corner to resize it.</p>
               <div className="choice-row">
                 <button className={finding.selected ? "active-redact" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, true); }}>✓ Redact</button>
                 <button className={!finding.selected ? "active-keep" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, false); }}>× Keep</button>
+                {!finding.manual && <button onClick={(event) => { event.stopPropagation(); selectSimilar(finding); }}>Select similar</button>}
+                {finding.rects.length > 1 && <button onClick={(event) => { event.stopPropagation(); showNextOccurrence(finding); }}>Next match</button>}
                 {finding.rects.length > 1 && <button onClick={(event) => { event.stopPropagation(); mergeFindingRects(finding.id); }}>Merge boxes</button>}
                 <button className="remove-finding" aria-label={`Remove ${finding.label}`} onClick={(event) => { event.stopPropagation(); removeFinding(finding.id); }}>Delete</button>
               </div>
@@ -859,6 +1400,6 @@ export default function Home() {
       {message && <div className="review-message" role="status">{message}</div>}
     </section>}
 
-    {phase === "done" && <section className="done-screen"><div className="done-glow" /><div className="done-check">✓</div><div className="section-kicker success-kicker">LOCAL EXPORT COMPLETE</div><h1>Redaction complete.</h1><p>{selectedCount} sensitive {selectedCount === 1 ? "item was" : "items were"} flattened into a new PDF and downloaded to your device.</p><div className="done-actions"><button className="primary-button success-button" onClick={createRedactedPdf}>↓ Download again</button><button className="secondary-button" onClick={reset}>Process another document</button></div><div className="stat-grid"><article><strong>{selectedCount}</strong><small>ITEMS REDACTED</small></article><article><strong>{findings.length}</strong><small>ITEMS REVIEWED</small></article><article><strong>{pageCount}</strong><small>PAGES SCANNED</small></article></div><div className="done-note">The original PDF was not modified or uploaded.</div></section>}
+    {phase === "done" && <section className="done-screen"><div className="done-glow" /><div className="done-check">✓</div><div className="section-kicker success-kicker">LOCAL EXPORT VERIFIED</div><h1>Redaction complete.</h1><p>{selectedCount} sensitive {selectedCount === 1 ? "item was" : "items were"} burned into a rebuilt PDF and verified before download.</p>{verification && <div className="verification-card"><div><span>✓</span><strong>Post-export safety check passed</strong></div><ul><li><b>{verification.pageCount}</b> pages rebuilt from pixels</li><li><b>{verification.extractedCharacters}</b> extractable source characters remain</li><li><b>{verification.checkedRegions}/{verification.totalRegions}</b> approved regions verified dark</li></ul><small>The exported copy is intentionally image-based and is no longer searchable.</small></div>}<div className="done-actions"><button className="primary-button success-button" onClick={downloadLastExport}>↓ Download again</button><button className="secondary-button" onClick={reset}>Process another document</button></div><div className="stat-grid"><article><strong>{selectedCount}</strong><small>ITEMS REDACTED</small></article><article><strong>{findings.length}</strong><small>ITEMS REVIEWED</small></article><article><strong>{pageCount}</strong><small>PAGES VERIFIED</small></article></div><div className="done-note">The original PDF was not modified or uploaded. Verification also ran only in this browser.</div></section>}
   </main>;
 }
