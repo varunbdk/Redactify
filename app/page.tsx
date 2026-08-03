@@ -1,11 +1,27 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  DragEvent,
+  PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type Category = "PII" | "Financial" | "Identity" | "Network";
 type Phase = "hero" | "upload" | "review" | "done";
 type Rect = { page: number; x: number; y: number; width: number; height: number };
-type Finding = { id: string; label: string; detail: string; kind: Category; selected: boolean; rects: Rect[] };
+type Finding = {
+  id: string;
+  label: string;
+  detail: string;
+  kind: Category;
+  selected: boolean;
+  manual?: boolean;
+  rects: Rect[];
+};
 
 const categoryMeta: Record<Category, { label: string; className: string }> = {
   PII: { label: "Personal", className: "meta-purple" },
@@ -37,8 +53,260 @@ const getPdf = async () => {
   return pdfjs;
 };
 
+type PageSize = { width: number; height: number };
+type DraftRect = { x: number; y: number; width: number; height: number };
+type TextItem = { text: string; rect: Rect };
+
+const cloneFindings = (items: Finding[]) => items.map((item) => ({
+  ...item,
+  rects: item.rects.map((rect) => ({ ...rect })),
+}));
+
+const groupTextLines = (items: TextItem[]) => {
+  const lines: Array<{ y: number; height: number; items: TextItem[] }> = [];
+  for (const item of [...items].sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x)) {
+    const line = lines.find((candidate) => Math.abs(candidate.y - item.rect.y) <= Math.max(4, item.rect.height * .55));
+    if (line) {
+      line.items.push(item);
+      line.y = Math.min(line.y, item.rect.y);
+      line.height = Math.max(line.height, item.rect.height);
+    } else {
+      lines.push({ y: item.rect.y, height: item.rect.height, items: [item] });
+    }
+  }
+  return lines
+    .map((line) => ({ ...line, items: line.items.sort((a, b) => a.rect.x - b.rect.x) }))
+    .sort((a, b) => a.y - b.y);
+};
+
+const addressAnchor = /\b\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square)\b[,.]?/i;
+const addressContinuation = /(?:\b[A-Z]{1,3}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b(?:apartment|apt|suite|unit|floor|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|usa|canada|australia)\b|^[A-Za-zÀ-ÿ.'’ -]{3,55},?$)/i;
+const addressStop = /\b(?:transaction|date|description|amount|balance|statement|invoice|subtotal|total|iban|account|email|phone)\b/i;
+
+function PdfPageView({
+  bytes,
+  pageNumber,
+  zoom,
+  findings,
+  activeFindingId,
+  drawing,
+  onActivate,
+  onManualRect,
+  onEditStart,
+  onUpdateRect,
+}: {
+  bytes: Uint8Array;
+  pageNumber: number;
+  zoom: number;
+  findings: Finding[];
+  activeFindingId: string | null;
+  drawing: boolean;
+  onActivate: (id: string) => void;
+  onManualRect: (rect: Rect) => void;
+  onEditStart: () => void;
+  onUpdateRect: (findingId: string, rectIndex: number, rect: Rect) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawStartRef = useRef<{ x: number; y: number } | null>(null);
+  const [pageSize, setPageSize] = useState<PageSize>({ width: 0, height: 0 });
+  const [draft, setDraft] = useState<DraftRect | null>(null);
+  const [renderError, setRenderError] = useState("");
+  const editRef = useRef<{
+    findingId: string;
+    rectIndex: number;
+    mode: "move" | "resize";
+    clientX: number;
+    clientY: number;
+    original: Rect;
+  } | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let loadingTask: ReturnType<Awaited<ReturnType<typeof getPdf>>["getDocument"]> | undefined;
+    let renderTask: { cancel: () => void; promise: Promise<unknown> } | undefined;
+
+    const renderPage = async () => {
+      try {
+        setRenderError("");
+        setPageSize({ width: 0, height: 0 });
+        const pdfjs = await getPdf();
+        loadingTask = pdfjs.getDocument({ data: bytes.slice() });
+        const document = await loadingTask.promise;
+        const page = await document.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: zoom });
+        const canvas = canvasRef.current;
+        if (!canvas || disposed) return;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Canvas unavailable");
+        const outputScale = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        setPageSize({ width: viewport.width, height: viewport.height });
+        renderTask = page.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+          transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
+        });
+        await renderTask.promise;
+        const completedTask = loadingTask;
+        loadingTask = undefined;
+        await completedTask.destroy();
+      } catch (error) {
+        if (!disposed && (error as { name?: string }).name !== "RenderingCancelledException") {
+          console.error(error);
+          setRenderError("This page could not be displayed.");
+        }
+      }
+    };
+
+    void renderPage();
+    return () => {
+      disposed = true;
+      renderTask?.cancel();
+      const unfinishedTask = loadingTask;
+      loadingTask = undefined;
+      void unfinishedTask?.destroy();
+    };
+  }, [bytes, pageNumber, zoom]);
+
+  const pointFromEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(pageSize.width, event.clientX - bounds.left)),
+      y: Math.max(0, Math.min(pageSize.height, event.clientY - bounds.top)),
+    };
+  };
+
+  const beginDraw = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drawing || event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = pointFromEvent(event);
+    drawStartRef.current = point;
+    setDraft({ ...point, width: 0, height: 0 });
+  };
+
+  const continueDraw = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = drawStartRef.current;
+    if (!drawing || !start) return;
+    const point = pointFromEvent(event);
+    setDraft({
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    });
+  };
+
+  const finishDraw = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = drawStartRef.current;
+    if (!drawing || !start) return;
+    const point = pointFromEvent(event);
+    const finished = {
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    };
+    drawStartRef.current = null;
+    setDraft(null);
+    if (finished.width < 8 || finished.height < 8) return;
+    onManualRect({
+      page: pageNumber,
+      x: finished.x / zoom,
+      y: finished.y / zoom,
+      width: finished.width / zoom,
+      height: finished.height / zoom,
+    });
+  };
+
+  const beginEdit = (event: ReactPointerEvent<HTMLButtonElement>, findingId: string, rectIndex: number, rect: Rect) => {
+    if (drawing || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onEditStart();
+    onActivate(findingId);
+    editRef.current = {
+      findingId,
+      rectIndex,
+      mode: (event.target as HTMLElement).dataset.handle === "resize" ? "resize" : "move",
+      clientX: event.clientX,
+      clientY: event.clientY,
+      original: { ...rect },
+    };
+  };
+
+  const continueEdit = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const edit = editRef.current;
+    if (!edit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const dx = (event.clientX - edit.clientX) / zoom;
+    const dy = (event.clientY - edit.clientY) / zoom;
+    const maxWidth = pageSize.width / zoom;
+    const maxHeight = pageSize.height / zoom;
+    const next = edit.mode === "move" ? {
+      ...edit.original,
+      x: Math.max(0, Math.min(maxWidth - edit.original.width, edit.original.x + dx)),
+      y: Math.max(0, Math.min(maxHeight - edit.original.height, edit.original.y + dy)),
+    } : {
+      ...edit.original,
+      width: Math.max(8 / zoom, Math.min(maxWidth - edit.original.x, edit.original.width + dx)),
+      height: Math.max(8 / zoom, Math.min(maxHeight - edit.original.y, edit.original.height + dy)),
+    };
+    onUpdateRect(edit.findingId, edit.rectIndex, next);
+  };
+
+  const pageRects = findings.flatMap((finding) =>
+    finding.rects
+      .map((rect, index) => ({ finding, rect, index }))
+      .filter(({ rect }) => rect.page === pageNumber),
+  );
+
+  return <div
+    className={`pdf-page-shell ${drawing ? "drawing" : ""}`}
+    style={pageSize.width ? { width: pageSize.width, height: pageSize.height } : undefined}
+  >
+    <canvas ref={canvasRef} aria-label={`PDF page ${pageNumber}`} />
+    {!pageSize.width && !renderError && <div className="page-loading">Rendering page {pageNumber}…</div>}
+    {renderError && <div className="page-loading error">{renderError}</div>}
+    {pageSize.width > 0 && <div
+      className="pdf-overlay"
+      onPointerDown={beginDraw}
+      onPointerMove={continueDraw}
+      onPointerUp={finishDraw}
+      onPointerCancel={() => { drawStartRef.current = null; setDraft(null); }}
+    >
+      {pageRects.map(({ finding, rect, index }) => <button
+        type="button"
+        key={`${finding.id}-${index}`}
+        className={`redaction-box ${finding.selected ? "will-redact" : "will-keep"} ${finding.manual ? "manual" : ""} ${activeFindingId === finding.id ? "active" : ""}`}
+        style={{
+          left: rect.x * zoom,
+          top: rect.y * zoom,
+          width: rect.width * zoom,
+          height: rect.height * zoom,
+        }}
+        onPointerDown={(event) => beginEdit(event, finding.id, index, rect)}
+        onPointerMove={continueEdit}
+        onPointerUp={(event) => { event.stopPropagation(); editRef.current = null; }}
+        onPointerCancel={() => { editRef.current = null; }}
+        onClick={() => onActivate(finding.id)}
+        title={`${finding.selected ? "Will redact" : "Will keep"}: ${finding.label}`}
+        aria-label={`${finding.selected ? "Redact" : "Keep"} ${finding.label}`}
+      ><span className="resize-handle" data-handle="resize" aria-hidden="true" /></button>)}
+      {draft && <span className="redaction-draft" style={draft} />}
+    </div>}
+  </div>;
+}
+
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const historyRef = useRef<Finding[][]>([]);
   const [phase, setPhase] = useState<Phase>("hero");
   const [dragging, setDragging] = useState(false);
   const [fileName, setFileName] = useState("");
@@ -49,6 +317,10 @@ export default function Home() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [filter, setFilter] = useState<Category | "All">("All");
   const [message, setMessage] = useState("");
+  const [activePage, setActivePage] = useState(1);
+  const [zoom, setZoom] = useState(1);
+  const [drawing, setDrawing] = useState(false);
+  const [activeFindingId, setActiveFindingId] = useState<string | null>(null);
 
   const selectedCount = findings.filter((finding) => finding.selected).length;
   const filteredFindings = useMemo(
@@ -56,6 +328,23 @@ export default function Home() {
     [filter, findings],
   );
   const usedCategories = useMemo(() => [...new Set(findings.map((finding) => finding.kind))], [findings]);
+
+  const checkpoint = () => {
+    historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
+  };
+
+  const undo = () => {
+    const previous = historyRef.current.at(-1);
+    if (!previous) return;
+    historyRef.current = historyRef.current.slice(0, -1);
+    setFindings(previous);
+    setMessage("Last redaction edit undone.");
+  };
+
+  useEffect(() => {
+    if (!activeFindingId) return;
+    document.getElementById(`finding-${activeFindingId}`)?.scrollIntoView({ block: "nearest" });
+  }, [activeFindingId]);
 
   const analyzeFile = async (file?: File) => {
     if (!file) return;
@@ -71,6 +360,11 @@ export default function Home() {
     setFileName(file.name);
     setFindings([]);
     setMessage("");
+    setActivePage(1);
+    setZoom(1);
+    setDrawing(false);
+    setActiveFindingId(null);
+    historyRef.current = [];
     setAnalyzing(true);
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -84,24 +378,34 @@ export default function Home() {
         const page = await pdfDocument.getPage(pageNumber);
         const viewport = page.getViewport({ scale: 1 });
         const content = await page.getTextContent();
+        const pageItems: TextItem[] = [];
         for (const rawItem of content.items) {
           if (!("str" in rawItem) || !rawItem.str.trim()) continue;
           const item = rawItem as { str: string; transform: number[]; width: number; height: number };
-          for (const rule of rules) {
+          const transform = item.transform;
+          const itemWidth = Math.max(item.width || 0, Math.abs(transform[0]) * item.str.length * 0.5);
+          const itemHeight = Math.max(item.height || Math.abs(transform[3]), 10);
+          const wholeRect: Rect = {
+            page: pageNumber,
+            x: transform[4] - 1,
+            y: viewport.height - transform[5] - itemHeight - 1,
+            width: Math.max(itemWidth + 2, 8),
+            height: itemHeight + 2,
+          };
+          pageItems.push({ text: item.str, rect: wholeRect });
+          for (const rule of rules.filter((candidate) => candidate.label !== "Street address")) {
             rule.expression.lastIndex = 0;
             for (const match of item.str.matchAll(rule.expression)) {
               const value = match[0];
               const key = `${rule.kind}:${value.toLowerCase()}`;
-              const transform = item.transform;
-              const itemWidth = Math.max(item.width || 0, Math.abs(transform[0]) * item.str.length * 0.5);
               const leftRatio = (match.index || 0) / Math.max(item.str.length, 1);
               const rightRatio = ((match.index || 0) + value.length) / Math.max(item.str.length, 1);
               const rect: Rect = {
                 page: pageNumber,
                 x: transform[4] + itemWidth * leftRatio - 1,
-                y: viewport.height - transform[5] - Math.max(item.height || Math.abs(transform[3]), 9) - 1,
+                y: viewport.height - transform[5] - itemHeight - 1,
                 width: Math.max(itemWidth * (rightRatio - leftRatio) + 2, 8),
-                height: Math.max(item.height || Math.abs(transform[3]), 10) + 2,
+                height: itemHeight + 2,
               };
               const existing = found.get(key);
               if (existing) existing.rects.push(rect);
@@ -112,6 +416,34 @@ export default function Home() {
               });
             }
           }
+        }
+
+        const lines = groupTextLines(pageItems);
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+          const line = lines[lineIndex];
+          const lineText = line.items.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
+          if (!addressAnchor.test(lineText)) continue;
+          const addressLines = [line];
+          let previous = line;
+          for (let offset = 1; offset <= 3 && lineIndex + offset < lines.length; offset += 1) {
+            const candidate = lines[lineIndex + offset];
+            const candidateText = candidate.items.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim();
+            const gap = candidate.y - (previous.y + previous.height);
+            if (gap > Math.max(18, previous.height * 1.8) || addressStop.test(candidateText) || !addressContinuation.test(candidateText)) break;
+            addressLines.push(candidate);
+            previous = candidate;
+          }
+          const value = addressLines.map((addressLine) => addressLine.items.map((item) => item.text).join(" ").trim()).join(", ");
+          const key = `PII:address:${pageNumber}:${lineIndex}`;
+          found.set(key, {
+            id: crypto.randomUUID(),
+            label: value,
+            detail: `Complete address · Page ${pageNumber}`,
+            kind: "PII",
+            selected: true,
+            rects: addressLines.flatMap((addressLine) => addressLine.items.map((item) => ({ ...item.rect }))),
+          });
+          lineIndex += addressLines.length - 1;
         }
       }
       await loadingTask.destroy();
@@ -158,7 +490,8 @@ export default function Home() {
         });
       }
       await loadingTask.destroy();
-      const blob = new Blob([await output.save()], { type: "application/pdf" });
+      const redactedBytes = Uint8Array.from(await output.save());
+      const blob = new Blob([redactedBytes.buffer], { type: "application/pdf" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
       link.download = fileName.replace(/\.pdf$/i, "") + "-redacted.pdf";
@@ -176,11 +509,62 @@ export default function Home() {
 
   const reset = () => {
     setPhase("upload"); setFileName(""); setFileBytes(null); setPageCount(0);
-    setFindings([]); setFilter("All"); setMessage("");
+    setFindings([]); setFilter("All"); setMessage(""); setActivePage(1);
+    setZoom(1); setDrawing(false); setActiveFindingId(null);
+    historyRef.current = [];
   };
-  const toggle = (id: string, selected: boolean) => setFindings((items) => items.map((item) => item.id === id ? { ...item, selected } : item));
-  const acceptAll = () => setFindings((items) => items.map((item) => ({ ...item, selected: true })));
-  const rejectAll = () => setFindings((items) => items.map((item) => ({ ...item, selected: false })));
+  const toggle = (id: string, selected: boolean) => { checkpoint(); setFindings((items) => items.map((item) => item.id === id ? { ...item, selected } : item)); };
+  const acceptAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: true }))); };
+  const rejectAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: false }))); };
+  const showFinding = (finding: Finding) => {
+    const page = finding.rects[0]?.page;
+    if (page) setActivePage(page);
+    setActiveFindingId(finding.id);
+  };
+  const addManualRect = (rect: Rect) => {
+    checkpoint();
+    const id = crypto.randomUUID();
+    setFindings((items) => [...items, {
+      id,
+      label: "Manual redaction",
+      detail: `Manual selection · Page ${rect.page}`,
+      kind: "PII",
+      selected: true,
+      manual: true,
+      rects: [rect],
+    }]);
+    setFilter("All");
+    setActiveFindingId(id);
+    setDrawing(false);
+    setMessage(`Manual redaction added to page ${rect.page}.`);
+  };
+  const removeFinding = (id: string) => {
+    checkpoint();
+    setFindings((items) => items.filter((item) => item.id !== id));
+    if (activeFindingId === id) setActiveFindingId(null);
+  };
+  const updateRect = (findingId: string, rectIndex: number, rect: Rect) => {
+    setFindings((items) => items.map((item) => item.id !== findingId ? item : {
+      ...item,
+      rects: item.rects.map((current, index) => index === rectIndex ? rect : current),
+    }));
+  };
+  const mergeFindingRects = (id: string) => {
+    const finding = findings.find((item) => item.id === id);
+    if (!finding || finding.rects.length < 2) return;
+    checkpoint();
+    const byPage = new Map<number, Rect[]>();
+    finding.rects.forEach((rect) => byPage.set(rect.page, [...(byPage.get(rect.page) || []), rect]));
+    const merged = [...byPage.entries()].map(([page, rects]) => {
+      const x = Math.min(...rects.map((rect) => rect.x));
+      const y = Math.min(...rects.map((rect) => rect.y));
+      const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+      const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
+      return { page, x, y, width: right - x, height: bottom - y };
+    });
+    setFindings((items) => items.map((item) => item.id === id ? { ...item, rects: merged } : item));
+    setMessage("The selected redaction boxes were merged into one editable area per page.");
+  };
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault(); setDragging(false); analyzeFile(event.dataTransfer.files[0]);
   };
@@ -225,10 +609,79 @@ export default function Home() {
     </section>}
 
     {phase === "review" && <section className="review-screen">
-      <header className="review-toolbar"><div className="file-summary"><span className="file-icon">PDF</span><div><strong>{fileName}</strong><small>{findings.length} suggestions · {pageCount} {pageCount === 1 ? "page" : "pages"}</small></div></div><div className="toolbar-spacer" /><div className="decision-summary"><span>{selectedCount} selected</span><i /> <span>{findings.length - selectedCount} kept</span></div><button className="mini-button accept" onClick={acceptAll}>Redact all</button><button className="mini-button" onClick={rejectAll}>Keep all</button><button className="primary-button compact" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? "Creating…" : "Apply & export"} <b>→</b></button></header>
+      <header className="review-toolbar">
+        <div className="file-summary"><span className="file-icon">PDF</span><div><strong>{fileName}</strong><small>{findings.length} findings · {pageCount} {pageCount === 1 ? "page" : "pages"}</small></div></div>
+        <div className="toolbar-spacer" />
+        <div className="decision-summary"><span>{selectedCount} selected</span><i /><span>{findings.length - selectedCount} kept</span></div>
+        <button className="mini-button" onClick={undo} disabled={!historyRef.current.length}>↶ Undo edit</button>
+        <button className="mini-button accept" onClick={acceptAll}>Redact all</button>
+        <button className="mini-button" onClick={rejectAll}>Keep all</button>
+        <button className="primary-button compact" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? "Creating…" : "Apply & export"} <b>→</b></button>
+      </header>
       <div className="review-grid">
-        <div className="document-panel"><div className="panel-label"><span>FINDING MAP</span><i /></div><div className="paper"><div className="paper-head"><span>REDACTIFY LOCAL REVIEW</span><small>{pageCount} pages</small></div><h2>{fileName}</h2><p className="paper-intro">Detected regions are mapped below. Purple marks will be permanently covered; grey marks will remain visible.</p>{findings.slice(0, 10).map((finding) => <div className="paper-row" key={finding.id}><span className={`paper-mark ${finding.selected ? "will-redact" : "will-keep"}`} style={{ width: `${Math.min(88, Math.max(34, finding.label.length * 3.2))}%` }} /><small>p.{finding.rects[0]?.page}</small></div>)}{findings.length > 10 && <div className="paper-more">+ {findings.length - 10} additional suggestions</div>}</div><div className="privacy-card"><span>⌁</span><div><strong>This view is local.</strong><p>The document and extracted text remain in this browser tab.</p></div></div></div>
-        <aside className="suggestions-panel"><div className="suggestion-head"><div className="panel-label"><span><b /> LOCAL SUGGESTIONS</span></div><div className="filter-row"><button className={filter === "All" ? "active" : ""} onClick={() => setFilter("All")}>All</button>{usedCategories.map((kind) => <button key={kind} className={filter === kind ? `active ${categoryMeta[kind].className}` : ""} onClick={() => setFilter(kind)}>{categoryMeta[kind].label}</button>)}</div></div><div className="suggestion-list">{filteredFindings.map((finding, index) => <article className={`suggestion-card ${finding.selected ? "selected" : "kept"}`} key={finding.id} style={{ animationDelay: `${Math.min(index * 35, 350)}ms` }}><div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.rects.length > 1 ? ` · ${finding.rects.length} matches` : ""}</small></div><code>{finding.label}</code><p>Detected locally from the PDF text layer.</p><div className="choice-row"><button className={finding.selected ? "active-redact" : ""} onClick={() => toggle(finding.id, true)}>✓ Redact</button><button className={!finding.selected ? "active-keep" : ""} onClick={() => toggle(finding.id, false)}>× Keep</button></div></article>)}{!filteredFindings.length && <div className="no-suggestions">No suggestions in this filter.</div>}</div><div className="review-progress"><small>REVIEW PROGRESS</small><div className="progress-bar">{findings.map((finding) => <i key={finding.id} className={finding.selected ? "selected" : "kept"} />)}</div><p><span>{selectedCount} selected</span><span>{findings.length - selectedCount} kept</span></p></div></aside>
+        <div className="document-panel">
+          <div className="panel-label"><span>LIVE PDF REVIEW</span><i /></div>
+          <div className="viewer-toolbar" aria-label="PDF viewer controls">
+            <div className="page-controls">
+              <button type="button" onClick={() => { setActivePage((page) => Math.max(1, page - 1)); setActiveFindingId(null); }} disabled={activePage <= 1} aria-label="Previous page">←</button>
+              <span>Page <strong>{activePage}</strong> of {pageCount}</span>
+              <button type="button" onClick={() => { setActivePage((page) => Math.min(pageCount, page + 1)); setActiveFindingId(null); }} disabled={activePage >= pageCount} aria-label="Next page">→</button>
+            </div>
+            <div className="zoom-controls">
+              <button type="button" onClick={() => setZoom((value) => Math.max(.65, Number((value - .15).toFixed(2))))} disabled={zoom <= .65} aria-label="Zoom out">−</button>
+              <span>{Math.round(zoom * 100)}%</span>
+              <button type="button" onClick={() => setZoom((value) => Math.min(1.75, Number((value + .15).toFixed(2))))} disabled={zoom >= 1.75} aria-label="Zoom in">+</button>
+            </div>
+            <button type="button" className={`draw-button ${drawing ? "active" : ""}`} onClick={() => setDrawing((value) => !value)} aria-pressed={drawing}>
+              {drawing ? "Cancel drawing" : "+ Draw redaction"}
+            </button>
+          </div>
+          {drawing && <div className="draw-help" role="status">Drag across anything else you want to remove. The box will be added to your review list.</div>}
+          <div className="pdf-stage">
+            {fileBytes && <PdfPageView
+              key={`${activePage}-${zoom}`}
+              bytes={fileBytes}
+              pageNumber={activePage}
+              zoom={zoom}
+              findings={findings}
+              activeFindingId={activeFindingId}
+              drawing={drawing}
+              onActivate={setActiveFindingId}
+              onManualRect={addManualRect}
+              onEditStart={checkpoint}
+              onUpdateRect={updateRect}
+            />}
+          </div>
+          <div className="viewer-legend"><span><i className="legend-redact" /> Will redact</span><span><i className="legend-keep" /> Will keep</span><span><i className="legend-manual" /> Manual</span></div>
+          <div className="privacy-card"><span>⌁</span><div><strong>This view is local.</strong><p>The PDF page, your manual boxes, and extracted text remain in this browser tab.</p></div></div>
+        </div>
+        <aside className="suggestions-panel">
+          <div className="suggestion-head">
+            <div className="panel-label"><span><b /> REVIEW FINDINGS</span></div>
+            <div className="filter-row"><button className={filter === "All" ? "active" : ""} onClick={() => setFilter("All")}>All</button>{usedCategories.map((kind) => <button key={kind} className={filter === kind ? `active ${categoryMeta[kind].className}` : ""} onClick={() => setFilter(kind)}>{categoryMeta[kind].label}</button>)}</div>
+          </div>
+          <div className="suggestion-list">
+            {filteredFindings.map((finding, index) => <article
+              id={`finding-${finding.id}`}
+              className={`suggestion-card ${finding.selected ? "selected" : "kept"} ${activeFindingId === finding.id ? "active" : ""}`}
+              key={finding.id}
+              style={{ animationDelay: `${Math.min(index * 35, 350)}ms` }}
+              onClick={() => showFinding(finding)}
+            >
+              <div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.manual ? "MANUAL" : finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.rects.length > 1 ? ` · ${finding.rects.length} matches` : ""}</small><button type="button" className="locate-button" onClick={() => showFinding(finding)}>View</button></div>
+              <code>{finding.label}</code>
+              <p>{finding.manual ? "Drawn by you on the real PDF page." : "Detected locally from the PDF text layer."} Drag the box to move it; drag its corner to resize it.</p>
+              <div className="choice-row">
+                <button className={finding.selected ? "active-redact" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, true); }}>✓ Redact</button>
+                <button className={!finding.selected ? "active-keep" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, false); }}>× Keep</button>
+                {finding.rects.length > 1 && <button onClick={(event) => { event.stopPropagation(); mergeFindingRects(finding.id); }}>Merge boxes</button>}
+                <button className="remove-finding" aria-label={`Remove ${finding.label}`} onClick={(event) => { event.stopPropagation(); removeFinding(finding.id); }}>Delete</button>
+              </div>
+            </article>)}
+            {!filteredFindings.length && <div className="no-suggestions"><strong>No findings here.</strong><span>Use “Draw redaction” to mark anything you want to remove manually.</span></div>}
+          </div>
+          <div className="review-progress"><small>REVIEW PROGRESS</small><div className="progress-bar">{findings.map((finding) => <i key={finding.id} className={finding.selected ? "selected" : "kept"} />)}</div><p><span>{selectedCount} selected</span><span>{findings.length - selectedCount} kept</span></p></div>
+        </aside>
       </div>
       {message && <div className="review-message" role="status">{message}</div>}
     </section>}
