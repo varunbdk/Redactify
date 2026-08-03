@@ -22,6 +22,16 @@ type Finding = {
   manual?: boolean;
   rects: Rect[];
 };
+type LocalInspection = {
+  pdfType: "TextBased" | "Scanned" | "ImageBased" | "Mixed";
+  pageCount: number;
+  pagesNeedingOcr: number[];
+  confidence: number;
+  processingTimeMs: number;
+  hasEncodingIssues: boolean;
+  layout: { isComplex: boolean; pagesWithTables: number[]; pagesWithColumns: number[] };
+  version: string;
+};
 
 const categoryMeta: Record<Category, { label: string; className: string }> = {
   PII: { label: "Personal", className: "meta-purple" },
@@ -53,6 +63,40 @@ const getPdf = async () => {
   return pdfjs;
 };
 
+const inspectLocally = (bytes: Uint8Array) => new Promise<LocalInspection>((resolve, reject) => {
+  const worker = new Worker(new URL("./pdf-inspector.worker.ts", import.meta.url), { type: "module" });
+  const id = crypto.randomUUID();
+  const timeout = window.setTimeout(() => {
+    worker.terminate();
+    reject(new Error("Local PDF inspection timed out"));
+  }, 45_000);
+  const finish = () => {
+    window.clearTimeout(timeout);
+    worker.terminate();
+  };
+  worker.onerror = (event) => {
+    finish();
+    reject(new Error(event.message || "Local PDF inspection failed"));
+  };
+  worker.onmessage = (event: MessageEvent<{
+    id: string;
+    ok: boolean;
+    result?: Omit<LocalInspection, "version">;
+    version?: string;
+    error?: string;
+  }>) => {
+    if (event.data.id !== id) return;
+    finish();
+    if (!event.data.ok || !event.data.result) {
+      reject(new Error(event.data.error || "Local PDF inspection failed"));
+      return;
+    }
+    resolve({ ...event.data.result, version: event.data.version || "unknown" });
+  };
+  const transferable = bytes.slice().buffer as ArrayBuffer;
+  worker.postMessage({ id, bytes: transferable }, [transferable]);
+});
+
 type PageSize = { width: number; height: number };
 type DraftRect = { x: number; y: number; width: number; height: number };
 type TextItem = { text: string; rect: Rect };
@@ -80,7 +124,7 @@ const groupTextLines = (items: TextItem[]) => {
 };
 
 const addressAnchor = /\b\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square)\b[,.]?/i;
-const addressContinuation = /(?:\b[A-Z]{1,3}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b(?:apartment|apt|suite|unit|floor|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|usa|canada|australia)\b|^[A-Za-zÀ-ÿ.'’ -]{3,55},?$)/i;
+const addressContinuation = /(?:\b[A-Z]{1,3}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b(?:apartment|apt|suite|unit|floor|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|usa|canada|australia)\b|^[A-Za-zÀ-ÿ.'’, -]{3,55}$)/i;
 const addressStop = /\b(?:transaction|date|description|amount|balance|statement|invoice|subtotal|total|iban|account|email|phone)\b/i;
 
 function PdfPageView({
@@ -321,6 +365,7 @@ export default function Home() {
   const [zoom, setZoom] = useState(1);
   const [drawing, setDrawing] = useState(false);
   const [activeFindingId, setActiveFindingId] = useState<string | null>(null);
+  const [inspection, setInspection] = useState<LocalInspection | null>(null);
 
   const selectedCount = findings.filter((finding) => finding.selected).length;
   const filteredFindings = useMemo(
@@ -364,11 +409,16 @@ export default function Home() {
     setZoom(1);
     setDrawing(false);
     setActiveFindingId(null);
+    setInspection(null);
     historyRef.current = [];
     setAnalyzing(true);
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       setFileBytes(bytes);
+      const inspectionPromise = inspectLocally(bytes).catch((error) => {
+        console.warn("pdf-inspector was unavailable; continuing with PDF.js", error);
+        return null;
+      });
       const pdfjs = await getPdf();
       const loadingTask = pdfjs.getDocument({ data: bytes.slice() });
       const pdfDocument = await loadingTask.promise;
@@ -446,9 +496,15 @@ export default function Home() {
           lineIndex += addressLines.length - 1;
         }
       }
+      const localInspection = await inspectionPromise;
+      setInspection(localInspection);
       await loadingTask.destroy();
       setFindings([...found.values()]);
-      setMessage(found.size ? "Analysis complete. Your document never left this browser." : "No common sensitive patterns were found.");
+      if (localInspection?.pagesNeedingOcr.length) {
+        setMessage(`Local analysis complete. ${localInspection.pagesNeedingOcr.length} ${localInspection.pagesNeedingOcr.length === 1 ? "page needs" : "pages need"} OCR before all content can be checked.`);
+      } else {
+        setMessage(found.size ? "Analysis complete. Your document never left this browser." : "No common sensitive patterns were found.");
+      }
       setPhase("review");
     } catch (error) {
       console.error(error);
@@ -511,6 +567,7 @@ export default function Home() {
     setPhase("upload"); setFileName(""); setFileBytes(null); setPageCount(0);
     setFindings([]); setFilter("All"); setMessage(""); setActivePage(1);
     setZoom(1); setDrawing(false); setActiveFindingId(null);
+    setInspection(null);
     historyRef.current = [];
   };
   const toggle = (id: string, selected: boolean) => { checkpoint(); setFindings((items) => items.map((item) => item.id === id ? { ...item, selected } : item)); };
@@ -637,6 +694,14 @@ export default function Home() {
             </button>
           </div>
           {drawing && <div className="draw-help" role="status">Drag across anything else you want to remove. The box will be added to your review list.</div>}
+          {inspection && <div className={`inspection-strip ${inspection.pagesNeedingOcr.length ? "needs-ocr" : "ready"}`}>
+            <span>LOCAL RUST/WASM INSPECTOR</span>
+            <strong>{inspection.pdfType.replace(/([a-z])([A-Z])/g, "$1 $2")}</strong>
+            <small>{inspection.pagesNeedingOcr.length
+              ? `OCR recommended for ${inspection.pagesNeedingOcr.map((page) => `p.${page}`).join(", ")}`
+              : `All ${inspection.pageCount} pages contain extractable text`}</small>
+            {inspection.layout.isComplex && <small>Complex layout detected</small>}
+          </div>}
           <div className="pdf-stage">
             {fileBytes && <PdfPageView
               key={`${activePage}-${zoom}`}
@@ -653,7 +718,7 @@ export default function Home() {
             />}
           </div>
           <div className="viewer-legend"><span><i className="legend-redact" /> Will redact</span><span><i className="legend-keep" /> Will keep</span><span><i className="legend-manual" /> Manual</span></div>
-          <div className="privacy-card"><span>⌁</span><div><strong>This view is local.</strong><p>The PDF page, your manual boxes, and extracted text remain in this browser tab.</p></div></div>
+          <div className="privacy-card"><span>⌁</span><div><strong>This view is local.</strong><p>The PDF page, your manual boxes, PDF.js extraction, and pdf-inspector WASM analysis remain in this browser tab.</p></div></div>
         </div>
         <aside className="suggestions-panel">
           <div className="suggestion-head">

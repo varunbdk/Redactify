@@ -60,3 +60,18 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.resize-handle/);
   assert.match(css, /cursor:crosshair/);
 });
+
+test("integrates the local pdf-inspector WebAssembly worker", async () => {
+  const [page, worker, packageFile] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/pdf-inspector.worker.ts", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(packageFile, /@firecrawl\/pdf-inspector-wasm/);
+  assert.match(worker, /processPdf/);
+  assert.match(worker, /profile: "compact"/);
+  assert.match(page, /new Worker\(new URL\("\.\/pdf-inspector\.worker\.ts"/);
+  assert.match(page, /LOCAL RUST\/WASM INSPECTOR/);
+  assert.match(page, /pagesNeedingOcr/);
+});
