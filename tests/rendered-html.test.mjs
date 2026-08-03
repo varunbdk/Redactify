@@ -50,14 +50,24 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /onManualRect=\{addManualRect\}/);
   assert.match(page, /Manual redaction/);
   assert.match(page, /Apply & export/);
-  assert.match(page, /Undo edit/);
+  assert.match(page, /↶ Undo/);
   assert.match(page, /Merge boxes/);
   assert.match(page, /onUpdateRect=\{updateRect\}/);
+  assert.match(page, /onDeleteFinding=\{removeFinding\}/);
+  assert.match(page, /Delete selected manual redaction/);
+  assert.match(page, /className="pdf-page-entry"/);
+  assert.match(page, /onScroll=\{updatePageFromScroll\}/);
+  assert.match(page, /left: draft\.x, top: draft\.y/);
+  assert.doesNotMatch(page, /<header className="review-toolbar">/);
   assert.match(page, /Complete address/);
   assert.match(css, /\.pdf-page-shell/);
   assert.match(css, /\.pdf-overlay/);
   assert.match(css, /\.redaction-box/);
   assert.match(css, /\.resize-handle/);
+  assert.match(css, /\.handle-n/);
+  assert.match(css, /\.handle-w/);
+  assert.match(css, /\.redaction-delete-button/);
+  assert.match(css, /\.review-sidebar-toolbar/);
   assert.match(css, /cursor:crosshair/);
 });
 

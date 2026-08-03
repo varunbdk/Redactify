@@ -3,6 +3,7 @@
 import {
   ChangeEvent,
   DragEvent,
+  Fragment,
   PointerEvent as ReactPointerEvent,
   useEffect,
   useMemo,
@@ -100,6 +101,7 @@ const inspectLocally = (bytes: Uint8Array) => new Promise<LocalInspection>((reso
 type PageSize = { width: number; height: number };
 type DraftRect = { x: number; y: number; width: number; height: number };
 type TextItem = { text: string; rect: Rect };
+type ResizeDirection = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 
 const cloneFindings = (items: Finding[]) => items.map((item) => ({
   ...item,
@@ -138,6 +140,7 @@ function PdfPageView({
   onManualRect,
   onEditStart,
   onUpdateRect,
+  onDeleteFinding,
 }: {
   bytes: Uint8Array;
   pageNumber: number;
@@ -149,6 +152,7 @@ function PdfPageView({
   onManualRect: (rect: Rect) => void;
   onEditStart: () => void;
   onUpdateRect: (findingId: string, rectIndex: number, rect: Rect) => void;
+  onDeleteFinding: (findingId: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -158,7 +162,7 @@ function PdfPageView({
   const editRef = useRef<{
     findingId: string;
     rectIndex: number;
-    mode: "move" | "resize";
+    mode: "move" | ResizeDirection;
     clientX: number;
     clientY: number;
     original: Rect;
@@ -274,10 +278,13 @@ function PdfPageView({
     event.currentTarget.setPointerCapture(event.pointerId);
     onEditStart();
     onActivate(findingId);
+    const requestedHandle = (event.target as HTMLElement).dataset.handle;
     editRef.current = {
       findingId,
       rectIndex,
-      mode: (event.target as HTMLElement).dataset.handle === "resize" ? "resize" : "move",
+      mode: requestedHandle && ["n", "ne", "e", "se", "s", "sw", "w", "nw"].includes(requestedHandle)
+        ? requestedHandle as ResizeDirection
+        : "move",
       clientX: event.clientX,
       clientY: event.clientY,
       original: { ...rect },
@@ -293,15 +300,29 @@ function PdfPageView({
     const dy = (event.clientY - edit.clientY) / zoom;
     const maxWidth = pageSize.width / zoom;
     const maxHeight = pageSize.height / zoom;
-    const next = edit.mode === "move" ? {
-      ...edit.original,
-      x: Math.max(0, Math.min(maxWidth - edit.original.width, edit.original.x + dx)),
-      y: Math.max(0, Math.min(maxHeight - edit.original.height, edit.original.y + dy)),
-    } : {
-      ...edit.original,
-      width: Math.max(8 / zoom, Math.min(maxWidth - edit.original.x, edit.original.width + dx)),
-      height: Math.max(8 / zoom, Math.min(maxHeight - edit.original.y, edit.original.height + dy)),
-    };
+    let next = { ...edit.original };
+    if (edit.mode === "move") {
+      next.x = Math.max(0, Math.min(maxWidth - edit.original.width, edit.original.x + dx));
+      next.y = Math.max(0, Math.min(maxHeight - edit.original.height, edit.original.y + dy));
+    } else {
+      const minimum = 8 / zoom;
+      const originalRight = edit.original.x + edit.original.width;
+      const originalBottom = edit.original.y + edit.original.height;
+      if (edit.mode.includes("e")) {
+        next.width = Math.max(minimum, Math.min(maxWidth - edit.original.x, edit.original.width + dx));
+      }
+      if (edit.mode.includes("s")) {
+        next.height = Math.max(minimum, Math.min(maxHeight - edit.original.y, edit.original.height + dy));
+      }
+      if (edit.mode.includes("w")) {
+        next.x = Math.max(0, Math.min(originalRight - minimum, edit.original.x + dx));
+        next.width = originalRight - next.x;
+      }
+      if (edit.mode.includes("n")) {
+        next.y = Math.max(0, Math.min(originalBottom - minimum, edit.original.y + dy));
+        next.height = originalBottom - next.y;
+      }
+    }
     onUpdateRect(edit.findingId, edit.rectIndex, next);
   };
 
@@ -325,25 +346,37 @@ function PdfPageView({
       onPointerUp={finishDraw}
       onPointerCancel={() => { drawStartRef.current = null; setDraft(null); }}
     >
-      {pageRects.map(({ finding, rect, index }) => <button
-        type="button"
-        key={`${finding.id}-${index}`}
-        className={`redaction-box ${finding.selected ? "will-redact" : "will-keep"} ${finding.manual ? "manual" : ""} ${activeFindingId === finding.id ? "active" : ""}`}
-        style={{
-          left: rect.x * zoom,
-          top: rect.y * zoom,
-          width: rect.width * zoom,
-          height: rect.height * zoom,
-        }}
-        onPointerDown={(event) => beginEdit(event, finding.id, index, rect)}
-        onPointerMove={continueEdit}
-        onPointerUp={(event) => { event.stopPropagation(); editRef.current = null; }}
-        onPointerCancel={() => { editRef.current = null; }}
-        onClick={() => onActivate(finding.id)}
-        title={`${finding.selected ? "Will redact" : "Will keep"}: ${finding.label}`}
-        aria-label={`${finding.selected ? "Redact" : "Keep"} ${finding.label}`}
-      ><span className="resize-handle" data-handle="resize" aria-hidden="true" /></button>)}
-      {draft && <span className="redaction-draft" style={draft} />}
+      {pageRects.map(({ finding, rect, index }) => <Fragment key={`${finding.id}-${index}`}>
+        <button
+          type="button"
+          className={`redaction-box ${finding.selected ? "will-redact" : "will-keep"} ${finding.manual ? "manual" : ""} ${activeFindingId === finding.id ? "active" : ""}`}
+          style={{
+            left: rect.x * zoom,
+            top: rect.y * zoom,
+            width: rect.width * zoom,
+            height: rect.height * zoom,
+          }}
+          onPointerDown={(event) => beginEdit(event, finding.id, index, rect)}
+          onPointerMove={continueEdit}
+          onPointerUp={(event) => { event.stopPropagation(); editRef.current = null; }}
+          onPointerCancel={() => { editRef.current = null; }}
+          onClick={() => onActivate(finding.id)}
+          title={`${finding.selected ? "Will redact" : "Will keep"}: ${finding.label}`}
+          aria-label={`${finding.selected ? "Redact" : "Keep"} ${finding.label}`}
+        >
+          {(["n", "ne", "e", "se", "s", "sw", "w", "nw"] as ResizeDirection[]).map((direction) =>
+            <span key={direction} className={`resize-handle handle-${direction}`} data-handle={direction} aria-hidden="true" />)}
+        </button>
+        {finding.manual && activeFindingId === finding.id && <button
+          type="button"
+          className="redaction-delete-button"
+          style={{ left: (rect.x + rect.width) * zoom - 15, top: rect.y * zoom - 36 }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); onDeleteFinding(finding.id); }}
+          aria-label="Delete selected manual redaction"
+        >× <span>Delete box</span></button>}
+      </Fragment>)}
+      {draft && <span className="redaction-draft" style={{ left: draft.x, top: draft.y, width: draft.width, height: draft.height }} />}
     </div>}
   </div>;
 }
@@ -351,6 +384,8 @@ function PdfPageView({
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const historyRef = useRef<Finding[][]>([]);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const pageEntryRefs = useRef(new Map<number, HTMLDivElement>());
   const [phase, setPhase] = useState<Phase>("hero");
   const [dragging, setDragging] = useState(false);
   const [fileName, setFileName] = useState("");
@@ -373,6 +408,40 @@ export default function Home() {
     [filter, findings],
   );
   const usedCategories = useMemo(() => [...new Set(findings.map((finding) => finding.kind))], [findings]);
+
+  const goToPage = (requestedPage: number, behavior: ScrollBehavior = "smooth") => {
+    const page = Math.max(1, Math.min(pageCount, requestedPage));
+    setActivePage(page);
+    window.requestAnimationFrame(() => {
+      const stage = stageRef.current;
+      const entry = pageEntryRefs.current.get(page);
+      if (!stage || !entry) return;
+      const stageBounds = stage.getBoundingClientRect();
+      const entryBounds = entry.getBoundingClientRect();
+      stage.scrollTo({ top: stage.scrollTop + entryBounds.top - stageBounds.top - 16, behavior });
+    });
+  };
+
+  const updatePageFromScroll = () => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const stageBounds = stage.getBoundingClientRect();
+    const focusLine = stageBounds.top + Math.min(stage.clientHeight * .35, 260);
+    let closestPage = activePage;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    pageEntryRefs.current.forEach((entry, page) => {
+      const bounds = entry.getBoundingClientRect();
+      const distance = Math.abs(bounds.top - focusLine);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestPage = page;
+      }
+    });
+    if (closestPage !== activePage) {
+      setActivePage(closestPage);
+      setActiveFindingId(null);
+    }
+  };
 
   const checkpoint = () => {
     historyRef.current = [...historyRef.current.slice(-29), cloneFindings(findings)];
@@ -575,7 +644,7 @@ export default function Home() {
   const rejectAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: false }))); };
   const showFinding = (finding: Finding) => {
     const page = finding.rects[0]?.page;
-    if (page) setActivePage(page);
+    if (page) goToPage(page);
     setActiveFindingId(finding.id);
   };
   const addManualRect = (rect: Rect) => {
@@ -666,23 +735,14 @@ export default function Home() {
     </section>}
 
     {phase === "review" && <section className="review-screen">
-      <header className="review-toolbar">
-        <div className="file-summary"><span className="file-icon">PDF</span><div><strong>{fileName}</strong><small>{findings.length} findings · {pageCount} {pageCount === 1 ? "page" : "pages"}</small></div></div>
-        <div className="toolbar-spacer" />
-        <div className="decision-summary"><span>{selectedCount} selected</span><i /><span>{findings.length - selectedCount} kept</span></div>
-        <button className="mini-button" onClick={undo} disabled={!historyRef.current.length}>↶ Undo edit</button>
-        <button className="mini-button accept" onClick={acceptAll}>Redact all</button>
-        <button className="mini-button" onClick={rejectAll}>Keep all</button>
-        <button className="primary-button compact" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? "Creating…" : "Apply & export"} <b>→</b></button>
-      </header>
       <div className="review-grid">
         <div className="document-panel">
           <div className="panel-label"><span>LIVE PDF REVIEW</span><i /></div>
           <div className="viewer-toolbar" aria-label="PDF viewer controls">
             <div className="page-controls">
-              <button type="button" onClick={() => { setActivePage((page) => Math.max(1, page - 1)); setActiveFindingId(null); }} disabled={activePage <= 1} aria-label="Previous page">←</button>
+              <button type="button" onClick={() => { goToPage(activePage - 1); setActiveFindingId(null); }} disabled={activePage <= 1} aria-label="Previous page">←</button>
               <span>Page <strong>{activePage}</strong> of {pageCount}</span>
-              <button type="button" onClick={() => { setActivePage((page) => Math.min(pageCount, page + 1)); setActiveFindingId(null); }} disabled={activePage >= pageCount} aria-label="Next page">→</button>
+              <button type="button" onClick={() => { goToPage(activePage + 1); setActiveFindingId(null); }} disabled={activePage >= pageCount} aria-label="Next page">→</button>
             </div>
             <div className="zoom-controls">
               <button type="button" onClick={() => setZoom((value) => Math.max(.65, Number((value - .15).toFixed(2))))} disabled={zoom <= .65} aria-label="Zoom out">−</button>
@@ -702,25 +762,43 @@ export default function Home() {
               : `All ${inspection.pageCount} pages contain extractable text`}</small>
             {inspection.layout.isComplex && <small>Complex layout detected</small>}
           </div>}
-          <div className="pdf-stage">
-            {fileBytes && <PdfPageView
-              key={`${activePage}-${zoom}`}
-              bytes={fileBytes}
-              pageNumber={activePage}
-              zoom={zoom}
-              findings={findings}
-              activeFindingId={activeFindingId}
-              drawing={drawing}
-              onActivate={setActiveFindingId}
-              onManualRect={addManualRect}
-              onEditStart={checkpoint}
-              onUpdateRect={updateRect}
-            />}
+          <div className="pdf-stage" ref={stageRef} onScroll={updatePageFromScroll}>
+            {fileBytes && Array.from({ length: pageCount }, (_, index) => index + 1).map((pageNumber) => <div
+              className="pdf-page-entry"
+              key={`${pageNumber}-${zoom}`}
+              data-page={pageNumber}
+              ref={(node) => { if (node) pageEntryRefs.current.set(pageNumber, node); else pageEntryRefs.current.delete(pageNumber); }}
+            >
+              <div className="pdf-page-number">Page {pageNumber}</div>
+              <PdfPageView
+                bytes={fileBytes}
+                pageNumber={pageNumber}
+                zoom={zoom}
+                findings={findings}
+                activeFindingId={activeFindingId}
+                drawing={drawing}
+                onActivate={setActiveFindingId}
+                onManualRect={addManualRect}
+                onEditStart={checkpoint}
+                onUpdateRect={updateRect}
+                onDeleteFinding={removeFinding}
+              />
+            </div>)}
           </div>
           <div className="viewer-legend"><span><i className="legend-redact" /> Will redact</span><span><i className="legend-keep" /> Will keep</span><span><i className="legend-manual" /> Manual</span></div>
           <div className="privacy-card"><span>⌁</span><div><strong>This view is local.</strong><p>The PDF page, your manual boxes, PDF.js extraction, and pdf-inspector WASM analysis remain in this browser tab.</p></div></div>
         </div>
         <aside className="suggestions-panel">
+          <div className="review-sidebar-toolbar">
+            <div className="file-summary"><span className="file-icon">PDF</span><div><strong>{fileName}</strong><small>{findings.length} findings · {pageCount} {pageCount === 1 ? "page" : "pages"}</small></div></div>
+            <div className="decision-summary"><span>{selectedCount} selected</span><i /><span>{findings.length - selectedCount} kept</span></div>
+            <div className="sidebar-actions">
+              <button className="mini-button" onClick={undo} disabled={!historyRef.current.length}>↶ Undo</button>
+              <button className="mini-button accept" onClick={acceptAll}>Redact all</button>
+              <button className="mini-button" onClick={rejectAll}>Keep all</button>
+            </div>
+            <button className="primary-button compact sidebar-export" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? "Creating…" : "Apply & export"} <b>→</b></button>
+          </div>
           <div className="suggestion-head">
             <div className="panel-label"><span><b /> REVIEW FINDINGS</span></div>
             <div className="filter-row"><button className={filter === "All" ? "active" : ""} onClick={() => setFilter("All")}>All</button>{usedCategories.map((kind) => <button key={kind} className={filter === kind ? `active ${categoryMeta[kind].className}` : ""} onClick={() => setFilter(kind)}>{categoryMeta[kind].label}</button>)}</div>
@@ -735,7 +813,7 @@ export default function Home() {
             >
               <div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.manual ? "MANUAL" : finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.rects.length > 1 ? ` · ${finding.rects.length} matches` : ""}</small><button type="button" className="locate-button" onClick={() => showFinding(finding)}>View</button></div>
               <code>{finding.label}</code>
-              <p>{finding.manual ? "Drawn by you on the real PDF page." : "Detected locally from the PDF text layer."} Drag the box to move it; drag its corner to resize it.</p>
+              <p>{finding.manual ? "Drawn by you on the real PDF page." : "Detected locally from the PDF text layer."} Drag the box to move it; drag any edge or corner to resize it.</p>
               <div className="choice-row">
                 <button className={finding.selected ? "active-redact" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, true); }}>✓ Redact</button>
                 <button className={!finding.selected ? "active-keep" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, false); }}>× Keep</button>
