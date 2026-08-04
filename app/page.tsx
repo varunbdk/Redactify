@@ -12,7 +12,7 @@ import {
 } from "react";
 
 type Category = "PII" | "Financial" | "Identity" | "Network";
-type Phase = "hero" | "upload" | "review" | "done";
+type Phase = "hero" | "review" | "done";
 type Confidence = "high" | "review";
 type Rect = { page: number; x: number; y: number; width: number; height: number };
 type Finding = {
@@ -836,7 +836,6 @@ export default function Home() {
       setMessage("Please choose a PDF smaller than 50 MB for reliable local processing.");
       return;
     }
-    setPhase("upload");
     setFileName(file.name);
     setFindings([]);
     setExtractedLines([]);
@@ -1131,7 +1130,7 @@ export default function Home() {
   };
 
   const reset = () => {
-    setPhase("upload"); setFileName(""); setFileBytes(null); setPageCount(0);
+    setPhase("hero"); setFileName(""); setFileBytes(null); setPageCount(0);
     setFindings([]); setExtractedLines([]); setCustomTerms(""); setFilter("All"); setMessage(""); setActivePage(1);
     setScannedPdfDetected(false);
     setZoom(1); setDrawing(false); setPreviewRedactions(false); setActiveFindingId(null); setSelectedFindingIds(new Set());
@@ -1316,48 +1315,84 @@ export default function Home() {
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault(); setDragging(false); analyzeFile(event.dataTransfer.files[0]);
   };
-  const phaseIndex = phase === "hero" ? 0 : phase === "upload" ? 1 : phase === "review" ? 2 : 3;
+  const loadSamplePdf = async () => {
+    if (analyzing) return;
+    try {
+      const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
+      const sample = await PDFDocument.create();
+      const regular = await sample.embedFont(StandardFonts.Helvetica);
+      const bold = await sample.embedFont(StandardFonts.HelveticaBold);
+      const drawPage = (title: string, lines: string[]) => {
+        const page = sample.addPage([612, 792]);
+        page.drawText("REDACTIFY SAMPLE — FICTIONAL DATA", { x: 54, y: 738, size: 10, font: bold, color: rgb(.42, .3, 1) });
+        page.drawText(title, { x: 54, y: 694, size: 22, font: bold, color: rgb(.09, .06, .23) });
+        lines.forEach((line, index) => page.drawText(line, { x: 54, y: 642 - index * 34, size: 12, font: regular, color: rgb(.16, .14, .26) }));
+      };
+      drawPage("Customer profile", [
+        "Account holder: Aarav Mehta",
+        "Residential address: 42 Fictional Avenue, Flat 7B, Mumbai 400001, India",
+        "Email address: aarav.mehta@example.test",
+        "Telephone: +91 98765 43210",
+        "IBAN: GB82 WEST 1234 5698 7654 32",
+        "Client reference: CUST-7842-9016",
+      ]);
+      drawPage("Account activity", [
+        "Account holder: Aarav Mehta",
+        "Transfer recipient: Priya Sharma",
+        "Payment reference: UPI-PS-1207-94",
+        "Service IP address: 203.0.113.42",
+        "Support email: private-banking@example.test",
+        "This sample contains fictional information for product testing only.",
+      ]);
+      const bytes = await sample.save();
+      const file = new File([bytes.slice().buffer as ArrayBuffer], "redactify-sample.pdf", { type: "application/pdf" });
+      await analyzeFile(file);
+    } catch (error) {
+      console.error(error);
+      setMessage("The sample document could not be created. Please choose a text-based PDF instead.");
+    }
+  };
+  const focusUploader = () => {
+    setPhase("hero");
+    requestAnimationFrame(() => document.getElementById("quick-upload")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  };
+  const phaseIndex = phase === "hero" ? 0 : phase === "review" ? 1 : 2;
 
   return <main className="app-shell">
     <nav className="top-nav">
       <button className="brand-button" onClick={() => setPhase("hero")} aria-label="Redactify home"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button>
-      <div className="progress-dots" aria-label={`Step ${phaseIndex + 1} of 4`}>{[0, 1, 2, 3].map((step) => <span key={step} className={step === phaseIndex ? "active" : step < phaseIndex ? "complete" : ""} />)}</div>
-      <button className="nav-action" onClick={() => setPhase("upload")}>Try it locally</button>
+      <div className="progress-dots" aria-label={`Step ${phaseIndex + 1} of 3`}>{[0, 1, 2].map((step) => <span key={step} className={step === phaseIndex ? "active" : step < phaseIndex ? "complete" : ""} />)}</div>
+      <button className="nav-action" onClick={focusUploader}>Redact a PDF</button>
     </nav>
 
     {phase === "hero" && <section className="hero-screen">
       <div className="ambient ambient-one" /><div className="ambient ambient-two" /><div className="ambient ambient-three" />
-      <div className="engine-badge"><span /> ON-DEVICE REDACTION ENGINE</div>
-      <h1><span>Redact with</span><em>surgical precision.</em></h1>
-      <p className="hero-copy">Open any PDF. Redactify surfaces sensitive details on your device and lets you decide exactly what disappears.</p>
-      <div className="hero-actions"><button className="primary-button" onClick={() => setPhase("upload")}>Start redacting <b>→</b></button><a className="secondary-button" href="#privacy-story">See how it works</a></div>
-      <div className="trust-pills"><span>✓ Files stay on device</span><span>✓ No account required</span><span>✓ Review every suggestion</span><span>✓ Flattened PDF export</span></div>
-      <div className="mock-window" aria-hidden="true">
-        <div className="window-bar"><span className="traffic"><i /><i /><i /></span><small>confidential_document.pdf</small></div>
-        <div className="mock-body"><div className="mock-line title" /><div className="mock-line short" /><div className="mock-line redacted medium" /><div className="mock-line long" /><div className="mock-line redacted long" /><div className="mock-line medium" /><div className="mock-line redacted short" /></div>
-        <div className="floating-detection"><small>LOCAL MATCH</small><strong>Sensitive identifier</strong><code>•••• •••• 9012</code><span><i>Redact</i><i>Keep</i></span></div>
+      <div className="hero-layout">
+        <div className="hero-intro">
+          <div className="engine-badge"><span /> LOCAL PRIVACY SCANNER</div>
+          <h1><span>Redact sensitive details.</span><em>Keep files on your device.</em></h1>
+          <p className="hero-copy">Find names, addresses, account details, and other sensitive text. Review every suggestion before creating a permanently redacted copy.</p>
+          <div className="hero-actions"><button className="primary-button" onClick={focusUploader}>Choose your PDF <b>→</b></button><a className="secondary-button" href="#privacy-story">How privacy works</a></div>
+          <div className="hero-assurances"><span>✓ No account</span><span>✓ No document upload</span><span>✓ You approve every redaction</span></div>
+        </div>
+        <div className="hero-uploader" id="quick-upload">
+          <div className="uploader-heading"><span>START HERE</span><strong>{analyzing ? "Reading your document…" : "Redact a PDF now"}</strong><p>{analyzing ? "Local detection is running in this browser." : "Drop a searchable, text-based PDF or select one from your device."}</p></div>
+          <div className={`upload-card compact-upload ${dragging ? "dragging" : ""} ${analyzing ? "analyzing" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => !analyzing && inputRef.current?.click()} role="button" tabIndex={0} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !analyzing) inputRef.current?.click(); }}>
+            <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
+            <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
+            <div className="upload-copy"><strong>{analyzing ? fileName : dragging ? "Release to analyse" : "Drag & drop your PDF"}</strong><small>{analyzing ? "Your file has not left this browser" : "or click to browse files"}</small></div>
+            {analyzing && <div className="analysis-track"><i /></div>}
+          </div>
+          <div className="upload-options"><button type="button" onClick={() => void loadSamplePdf()} disabled={analyzing}>Try with a sample PDF</button><span>Maximum file size: 50 MB</span></div>
+          <div className="format-notice"><span aria-hidden="true">i</span><p><strong>Text-based PDFs only.</strong> Scanned or image-only PDFs are not supported yet.</p></div>
+          {scannedPdfDetected ? <div className="scanned-pdf-notice" role="alert">
+            <span aria-hidden="true">!</span>
+            <div><strong>Scanned PDFs aren’t supported yet</strong><p>{message} Try exporting it as a searchable, text-based PDF and upload it again.</p></div>
+            <button type="button" onClick={() => { setScannedPdfDetected(false); setMessage(""); inputRef.current?.click(); }}>Choose another PDF</button>
+          </div> : message && <div className="inline-message" role="status">{message}</div>}
+        </div>
       </div>
-      <div className="privacy-story" id="privacy-story"><article><b>01</b><h2>Read locally</h2><p>The file stays in browser memory. There is no document upload or server copy.</p></article><article><b>02</b><h2>Review clearly</h2><p>Filter suggestions, inspect each match, and keep the final decision in your hands.</p></article><article><b>03</b><h2>Export safely</h2><p>Approved regions are flattened into a new PDF and downloaded directly.</p></article></div>
-    </section>}
-
-    {phase === "upload" && <section className="upload-screen">
-      <div className="ambient upload-ambient" />
-      <div className="section-kicker">LOCAL WORKSPACE</div>
-      <h1>{analyzing ? "Reading your document." : "Drop your document."}</h1>
-      <p>{analyzing ? "Finding common sensitive patterns without sending the file anywhere." : "PDF files up to 50 MB. Everything is processed in this browser."}</p>
-      <div className={`upload-card ${dragging ? "dragging" : ""} ${analyzing ? "analyzing" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => !analyzing && inputRef.current?.click()} role="button" tabIndex={0} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !analyzing) inputRef.current?.click(); }}>
-        <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
-        <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
-        <strong>{analyzing ? fileName : dragging ? "Release to analyze" : "Drag & drop your PDF here"}</strong>
-        <small>{analyzing ? "On-device analysis in progress…" : "or click to browse files"}</small>
-        {analyzing && <div className="analysis-track"><i /></div>}
-      </div>
-      {scannedPdfDetected ? <div className="scanned-pdf-notice" role="alert">
-        <span aria-hidden="true">!</span>
-        <div><strong>Scanned PDFs aren’t supported yet</strong><p>{message} Try exporting it as a searchable, text-based PDF and upload it again.</p></div>
-        <button type="button" onClick={() => { setScannedPdfDetected(false); setMessage(""); inputRef.current?.click(); }}>Choose another PDF</button>
-      </div> : message && <div className="inline-message" role="status">{message}</div>}
-      <div className="local-facts"><span>◈ No uploads</span><span>◈ No server storage</span><span>◈ Local PDF export</span></div>
+      <div className="privacy-story" id="privacy-story"><article><b>01 — OPEN LOCALLY</b><h2>Your PDF stays in browser memory</h2><p>Redactify does not send the document to our server or create a stored server copy.</p></article><article><b>02 — REVIEW YOURSELF</b><h2>Nothing disappears without approval</h2><p>Inspect, adjust, keep, or remove every suggested redaction before exporting.</p></article><article><b>03 — LEAVE CLEANLY</b><h2>Refreshing clears the workspace</h2><p>The working document lives only in the current browser session. The exported copy downloads directly to your device.</p></article></div>
     </section>}
 
     {phase === "review" && <section className="review-screen">

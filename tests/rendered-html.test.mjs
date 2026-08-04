@@ -30,10 +30,12 @@ test("server-renders the Redactify product and local-processing promise", async 
 
   const html = await response.text();
   assert.match(html, /<title>Redactify — Local PDF redaction<\/title>/i);
-  assert.match(html, /Redact with/);
-  assert.match(html, /surgical precision/);
-  assert.match(html, /Files stay on device/);
-  assert.match(html, /There is no document upload or server copy/);
+  assert.match(html, /Redact sensitive details/);
+  assert.match(html, /Keep files on your device/);
+  assert.match(html, /No document upload/);
+  assert.match(html, /does not send the document to our server/);
+  assert.match(html, /Text-based PDFs only/);
+  assert.match(html, /Try with a sample PDF/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
@@ -82,6 +84,9 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /extractedCharacterCount/);
   assert.match(page, /pagesWithoutText/);
   assert.match(page, /Choose another PDF/);
+  assert.match(page, /loadSamplePdf/);
+  assert.match(page, /REDACTIFY SAMPLE — FICTIONAL DATA/);
+  assert.match(page, /Maximum file size: 50 MB/);
   assert.match(page, /↶ Undo/);
   assert.match(page, /↷ Redo/);
   assert.match(page, /redoRef/);
@@ -129,6 +134,9 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.exact-text-panel/);
   assert.match(css, /\.history-button/);
   assert.match(css, /\.scanned-pdf-notice/);
+  assert.match(css, /\.hero-layout/);
+  assert.match(css, /\.hero-uploader/);
+  assert.match(css, /\.format-notice/);
   assert.match(css, /cursor:crosshair/);
 });
 
