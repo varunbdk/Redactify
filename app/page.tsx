@@ -657,6 +657,7 @@ export default function Home() {
   const [customTerms, setCustomTerms] = useState("");
   const [filter, setFilter] = useState<Category | "All">("All");
   const [message, setMessage] = useState("");
+  const [scannedPdfDetected, setScannedPdfDetected] = useState(false);
   const [activePage, setActivePage] = useState(1);
   const [zoom, setZoom] = useState(1);
   const [drawing, setDrawing] = useState(false);
@@ -825,6 +826,8 @@ export default function Home() {
 
   const analyzeFile = async (file?: File) => {
     if (!file) return;
+    setScannedPdfDetected(false);
+    setMessage("");
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
       setMessage("Please choose a PDF document.");
       return;
@@ -838,7 +841,6 @@ export default function Home() {
     setFindings([]);
     setExtractedLines([]);
     setCustomTerms("");
-    setMessage("");
     setActivePage(1);
     setZoom(1);
     setDrawing(false);
@@ -857,16 +859,15 @@ export default function Home() {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       setFileBytes(bytes);
-      const inspectionPromise = inspectLocally(bytes).catch((error) => {
-        console.warn("pdf-inspector was unavailable; continuing with PDF.js", error);
-        return null;
-      });
+      let inspectionPromise: Promise<LocalInspection | null> | null = null;
       const pdfjs = await getPdf();
       const loadingTask = pdfjs.getDocument({ data: bytes.slice() });
       const pdfDocument = await loadingTask.promise;
       setPageCount(pdfDocument.numPages);
       const found = new Map<string, Finding>();
       const documentLines: TextLine[] = [];
+      const pagesWithoutText: number[] = [];
+      let extractedCharacterCount = 0;
       const registerFinding = ({
         label,
         detector,
@@ -920,6 +921,15 @@ export default function Home() {
             height: itemHeight + 2,
           };
           pageItems.push({ text: item.str, rect: wholeRect });
+        }
+        const pageCharacterCount = pageItems.reduce((total, item) => total + item.text.trim().length, 0);
+        extractedCharacterCount += pageCharacterCount;
+        if (pageCharacterCount === 0) pagesWithoutText.push(pageNumber);
+        else if (!inspectionPromise) {
+          inspectionPromise = inspectLocally(bytes).catch((error) => {
+            console.warn("pdf-inspector was unavailable; continuing with PDF.js", error);
+            return null;
+          });
         }
 
         const lines = groupTextLines(pageItems);
@@ -1006,20 +1016,41 @@ export default function Home() {
           lineIndex += addressLines.length - 1;
         }
       }
-      const localInspection = await inspectionPromise;
-      setInspection(localInspection);
+      if (extractedCharacterCount === 0) {
+        await loadingTask.destroy();
+        setFileBytes(null);
+        setPageCount(0);
+        setInspection(null);
+        setScannedPdfDetected(true);
+        setMessage("Scanned or image-only PDFs are not supported yet. Redactify needs selectable text to detect sensitive information safely.");
+        return;
+      }
+      const localInspection = await (inspectionPromise ?? Promise.resolve(null));
       await loadingTask.destroy();
+      const unsupportedPages = new Set([
+        ...pagesWithoutText,
+        ...(localInspection?.pagesNeedingOcr ?? []),
+      ]);
+      const inspectionDetectedScans = localInspection
+        ? localInspection.pdfType === "Scanned" || localInspection.pdfType === "ImageBased" || localInspection.pdfType === "Mixed"
+        : false;
+      if (inspectionDetectedScans || unsupportedPages.size > 0) {
+        setFileBytes(null);
+        setPageCount(0);
+        setInspection(null);
+        setScannedPdfDetected(true);
+        setMessage("Scanned or image-only PDFs are not supported yet. Redactify needs selectable text to detect sensitive information safely.");
+        return;
+      }
+      setInspection(localInspection);
       setFindings([...found.values()]);
       setExtractedLines(documentLines);
-      if (localInspection?.pagesNeedingOcr.length) {
-        setMessage(`Local analysis complete. ${localInspection.pagesNeedingOcr.length} ${localInspection.pagesNeedingOcr.length === 1 ? "page has" : "pages have"} no readable text layer; review those pages manually.`);
-      } else {
-        setMessage(found.size ? "Analysis complete. High-confidence matches are selected; uncertain matches are marked for review." : "No common sensitive patterns were found.");
-      }
+      setMessage(found.size ? "Analysis complete. High-confidence matches are selected; uncertain matches are marked for review." : "No common sensitive patterns were found.");
       setPhase("review");
     } catch (error) {
       console.error(error);
       setFileBytes(null);
+      setScannedPdfDetected(false);
       setMessage("This PDF could not be read. Try a standard, non-password-protected PDF.");
     } finally {
       setAnalyzing(false);
@@ -1102,6 +1133,7 @@ export default function Home() {
   const reset = () => {
     setPhase("upload"); setFileName(""); setFileBytes(null); setPageCount(0);
     setFindings([]); setExtractedLines([]); setCustomTerms(""); setFilter("All"); setMessage(""); setActivePage(1);
+    setScannedPdfDetected(false);
     setZoom(1); setDrawing(false); setPreviewRedactions(false); setActiveFindingId(null); setSelectedFindingIds(new Set());
     setInspection(null); setVerification(null);
     exportedPdfRef.current = null;
@@ -1314,13 +1346,17 @@ export default function Home() {
       <h1>{analyzing ? "Reading your document." : "Drop your document."}</h1>
       <p>{analyzing ? "Finding common sensitive patterns without sending the file anywhere." : "PDF files up to 50 MB. Everything is processed in this browser."}</p>
       <div className={`upload-card ${dragging ? "dragging" : ""} ${analyzing ? "analyzing" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => !analyzing && inputRef.current?.click()} role="button" tabIndex={0} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !analyzing) inputRef.current?.click(); }}>
-        <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => analyzeFile(event.target.files?.[0])} />
+        <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
         <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
         <strong>{analyzing ? fileName : dragging ? "Release to analyze" : "Drag & drop your PDF here"}</strong>
         <small>{analyzing ? "On-device analysis in progress…" : "or click to browse files"}</small>
         {analyzing && <div className="analysis-track"><i /></div>}
       </div>
-      {message && <div className="inline-message" role="status">{message}</div>}
+      {scannedPdfDetected ? <div className="scanned-pdf-notice" role="alert">
+        <span aria-hidden="true">!</span>
+        <div><strong>Scanned PDFs aren’t supported yet</strong><p>{message} Try exporting it as a searchable, text-based PDF and upload it again.</p></div>
+        <button type="button" onClick={() => { setScannedPdfDetected(false); setMessage(""); inputRef.current?.click(); }}>Choose another PDF</button>
+      </div> : message && <div className="inline-message" role="status">{message}</div>}
       <div className="local-facts"><span>◈ No uploads</span><span>◈ No server storage</span><span>◈ Local PDF export</span></div>
     </section>}
 

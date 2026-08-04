@@ -77,6 +77,11 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Complete address/);
   assert.match(page, /Labelled person name/);
   assert.match(page, /Manual review needed/);
+  assert.match(page, /Scanned PDFs aren’t supported yet/);
+  assert.match(page, /scannedPdfDetected/);
+  assert.match(page, /extractedCharacterCount/);
+  assert.match(page, /pagesWithoutText/);
+  assert.match(page, /Choose another PDF/);
   assert.match(page, /↶ Undo/);
   assert.match(page, /↷ Redo/);
   assert.match(page, /redoRef/);
@@ -123,6 +128,7 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.bulk-selection-toolbar/);
   assert.match(css, /\.exact-text-panel/);
   assert.match(css, /\.history-button/);
+  assert.match(css, /\.scanned-pdf-notice/);
   assert.match(css, /cursor:crosshair/);
 });
 
