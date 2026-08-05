@@ -117,17 +117,51 @@ const getPdf = async () => {
   return pdfjs;
 };
 
-const inspectLocally = (bytes: Uint8Array) => new Promise<LocalInspection>((resolve, reject) => {
+type PdfModule = Awaited<ReturnType<typeof getPdf>>;
+type PdfLoadingTask = ReturnType<PdfModule["getDocument"]>;
+type PdfDocument = Awaited<PdfLoadingTask["promise"]>;
+type AnalysisProgress = { stage: "opening" | "analysing" | "inspecting"; current: number; total: number; detail: string };
+type ExportProgress = { stage: "rendering" | "verifying"; current: number; total: number; detail: string };
+
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_DOCUMENT_PAGES = 300;
+const MAX_CANVAS_PIXELS = 12_000_000;
+
+const nextPaint = () => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+const cancellationError = () => new DOMException("Operation cancelled", "AbortError");
+const isCancellation = (error: unknown) => error instanceof DOMException && error.name === "AbortError";
+const readablePdfError = (error: unknown) => {
+  const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
+  if (name === "PasswordException") return "Password-protected PDFs are not supported. Remove the password and try again.";
+  if (name === "InvalidPDFException") return "This PDF appears to be damaged or invalid. Try exporting a fresh copy.";
+  if (name === "MissingPDFException") return "The selected PDF could not be opened. Please choose it again.";
+  return "This PDF could not be read. Try a standard, non-password-protected PDF.";
+};
+
+const inspectLocally = (bytes: Uint8Array, signal?: AbortSignal) => new Promise<LocalInspection>((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(cancellationError());
+    return;
+  }
   const worker = new Worker(new URL("./pdf-inspector.worker.ts", import.meta.url), { type: "module" });
   const id = crypto.randomUUID();
+  let settled = false;
   const timeout = window.setTimeout(() => {
-    worker.terminate();
+    finish();
     reject(new Error("Local PDF inspection timed out"));
   }, 45_000);
   const finish = () => {
+    if (settled) return;
+    settled = true;
     window.clearTimeout(timeout);
+    signal?.removeEventListener("abort", cancel);
     worker.terminate();
   };
+  const cancel = () => {
+    finish();
+    reject(cancellationError());
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
   worker.onerror = (event) => {
     finish();
     reject(new Error(event.message || "Local PDF inspection failed"));
@@ -249,19 +283,37 @@ const darkRegionSamples = (context: CanvasRenderingContext2D, rect: Rect, width:
   }));
 };
 
-const verifyRedactedPdf = async (bytes: Uint8Array, selectedRects: Rect[], expectedPages: number): Promise<VerificationResult> => {
+const verifyRedactedPdf = async (
+  bytes: Uint8Array,
+  selectedRects: Rect[],
+  expectedPages: number,
+  signal?: AbortSignal,
+  onProgress?: (page: number, total: number) => void,
+): Promise<VerificationResult> => {
   const pdfjs = await getPdf();
   const loadingTask = pdfjs.getDocument({ data: bytes.slice() });
   const document = await loadingTask.promise;
+  const selectedRectsByPage = new Map<number, Rect[]>();
+  selectedRects.forEach((rect) => {
+    const pageRects = selectedRectsByPage.get(rect.page) || [];
+    pageRects.push(rect);
+    selectedRectsByPage.set(rect.page, pageRects);
+  });
   let extractedCharacters = 0;
   let checkedRegions = 0;
   try {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      if (signal?.aborted) throw cancellationError();
+      onProgress?.(pageNumber, document.numPages);
       const page = await document.getPage(pageNumber);
       const textContent = await page.getTextContent();
       extractedCharacters += textContent.items.reduce((total, item) => total + ("str" in item ? item.str.trim().length : 0), 0);
-      const pageRects = selectedRects.filter((rect) => rect.page === pageNumber);
-      if (!pageRects.length) continue;
+      const pageRects = selectedRectsByPage.get(pageNumber) || [];
+      if (!pageRects.length) {
+        page.cleanup();
+        if (pageNumber % 3 === 0) await nextPaint();
+        continue;
+      }
       const viewport = page.getViewport({ scale: 1 });
       const canvas = window.document.createElement("canvas");
       canvas.width = Math.ceil(viewport.width);
@@ -270,6 +322,8 @@ const verifyRedactedPdf = async (bytes: Uint8Array, selectedRects: Rect[], expec
       if (!context) throw new Error("Canvas unavailable during verification");
       await page.render({ canvas, canvasContext: context, viewport }).promise;
       checkedRegions += pageRects.filter((rect) => darkRegionSamples(context, rect, canvas.width, canvas.height)).length;
+      page.cleanup();
+      if (pageNumber % 3 === 0) await nextPaint();
     }
   } finally {
     await loadingTask.destroy();
@@ -284,7 +338,7 @@ const verifyRedactedPdf = async (bytes: Uint8Array, selectedRects: Rect[], expec
 };
 
 function PdfPageView({
-  bytes,
+  document,
   pageNumber,
   zoom,
   findings,
@@ -301,7 +355,7 @@ function PdfPageView({
   onDeleteFinding,
   onConfirmFinding,
 }: {
-  bytes: Uint8Array;
+  document: PdfDocument;
   pageNumber: number;
   zoom: number;
   findings: Finding[];
@@ -325,6 +379,7 @@ function PdfPageView({
   const [draft, setDraft] = useState<DraftRect | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<DraftRect | null>(null);
   const [renderError, setRenderError] = useState("");
+  const [renderAttempt, setRenderAttempt] = useState(0);
   const editRef = useRef<{
     findingId: string;
     rectIndex: number;
@@ -336,38 +391,36 @@ function PdfPageView({
 
   useEffect(() => {
     let disposed = false;
-    let loadingTask: ReturnType<Awaited<ReturnType<typeof getPdf>>["getDocument"]> | undefined;
     let renderTask: { cancel: () => void; promise: Promise<unknown> } | undefined;
+    let loadedPage: Awaited<ReturnType<PdfDocument["getPage"]>> | undefined;
+    let renderedCanvas: HTMLCanvasElement | null = null;
 
     const renderPage = async () => {
       try {
         setRenderError("");
         setPageSize({ width: 0, height: 0 });
-        const pdfjs = await getPdf();
-        loadingTask = pdfjs.getDocument({ data: bytes.slice() });
-        const document = await loadingTask.promise;
-        const page = await document.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: zoom });
+        loadedPage = await document.getPage(pageNumber);
+        const viewport = loadedPage.getViewport({ scale: zoom });
         const canvas = canvasRef.current;
         if (!canvas || disposed) return;
-        const context = canvas.getContext("2d");
+        renderedCanvas = canvas;
+        const context = canvas.getContext("2d", { alpha: false });
         if (!context) throw new Error("Canvas unavailable");
-        const outputScale = window.devicePixelRatio || 1;
+        const deviceScale = Math.min(window.devicePixelRatio || 1, 2);
+        const safeScale = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(viewport.width * viewport.height, 1));
+        const outputScale = Math.max(1, Math.min(deviceScale, safeScale));
         canvas.width = Math.floor(viewport.width * outputScale);
         canvas.height = Math.floor(viewport.height * outputScale);
         canvas.style.width = `${viewport.width}px`;
         canvas.style.height = `${viewport.height}px`;
         setPageSize({ width: viewport.width, height: viewport.height });
-        renderTask = page.render({
+        renderTask = loadedPage.render({
           canvas,
           canvasContext: context,
           viewport,
           transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
         });
         await renderTask.promise;
-        const completedTask = loadingTask;
-        loadingTask = undefined;
-        await completedTask.destroy();
       } catch (error) {
         if (!disposed && (error as { name?: string }).name !== "RenderingCancelledException") {
           console.error(error);
@@ -380,11 +433,13 @@ function PdfPageView({
     return () => {
       disposed = true;
       renderTask?.cancel();
-      const unfinishedTask = loadingTask;
-      loadingTask = undefined;
-      void unfinishedTask?.destroy();
+      loadedPage?.cleanup();
+      if (renderedCanvas) {
+        renderedCanvas.width = 1;
+        renderedCanvas.height = 1;
+      }
     };
-  }, [bytes, pageNumber, zoom]);
+  }, [document, pageNumber, renderAttempt, zoom]);
 
   const pointFromEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -581,7 +636,7 @@ function PdfPageView({
   >
     <canvas ref={canvasRef} aria-label={`PDF page ${pageNumber}`} />
     {!pageSize.width && !renderError && <div className="page-loading">Rendering page {pageNumber}…</div>}
-    {renderError && <div className="page-loading error">{renderError}</div>}
+    {renderError && <div className="page-loading error"><span>{renderError}</span><button type="button" onClick={() => setRenderAttempt((attempt) => attempt + 1)}>Retry page</button></div>}
     {pageSize.width > 0 && <div
       className="pdf-overlay"
       onPointerDown={beginOverlayInteraction}
@@ -645,13 +700,20 @@ export default function Home() {
   const exportedPdfRef = useRef<Uint8Array | null>(null);
   const occurrenceRef = useRef(new Map<string, number>());
   const stageRef = useRef<HTMLDivElement>(null);
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const reviewLoadingTaskRef = useRef<PdfLoadingTask | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
   const [phase, setPhase] = useState<Phase>("hero");
   const [dragging, setDragging] = useState(false);
   const [fileName, setFileName] = useState("");
   const [fileBytes, setFileBytes] = useState<Uint8Array | null>(null);
   const [pageCount, setPageCount] = useState(0);
+  const [pageDimensions, setPageDimensions] = useState<PageSize[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
   const [creating, setCreating] = useState(false);
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [extractedLines, setExtractedLines] = useState<TextLine[]>([]);
   const [customTerms, setCustomTerms] = useState("");
@@ -668,15 +730,62 @@ export default function Home() {
   const [verification, setVerification] = useState<VerificationResult | null>(null);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [reviewDocument, setReviewDocument] = useState<PdfDocument | null>(null);
+  const [viewerError, setViewerError] = useState("");
+  const [viewerLoadAttempt, setViewerLoadAttempt] = useState(0);
 
   const selectedCount = findings.filter((finding) => finding.selected).length;
   const bulkSelectionCount = selectedFindingIds.size;
   const reviewCount = findings.filter((finding) => finding.confidence === "review").length;
+  const analysisPercent = analysisProgress?.total
+    ? Math.max(3, Math.round((analysisProgress.current / analysisProgress.total) * 100))
+    : 8;
+  const exportPercent = exportProgress?.total
+    ? Math.max(3, Math.round((exportProgress.current / exportProgress.total) * 100))
+    : 8;
   const filteredFindings = useMemo(
     () => filter === "All" ? findings : findings.filter((finding) => finding.kind === filter),
     [filter, findings],
   );
   const usedCategories = useMemo(() => [...new Set(findings.map((finding) => finding.kind))], [findings]);
+
+  useEffect(() => {
+    if (phase !== "review" || !fileBytes) return;
+    let disposed = false;
+    const loadDocument = async () => {
+      try {
+        setViewerError("");
+        const pdfjs = await getPdf();
+        if (disposed) return;
+        const task = pdfjs.getDocument({ data: fileBytes.slice() });
+        reviewLoadingTaskRef.current = task;
+        const document = await task.promise;
+        if (disposed) {
+          await task.destroy();
+          return;
+        }
+        setReviewDocument(document);
+      } catch (error) {
+        if (!disposed) {
+          console.error(error);
+          setViewerError("The document viewer could not start. Try reopening the PDF.");
+        }
+      }
+    };
+    void loadDocument();
+    return () => {
+      disposed = true;
+      const task = reviewLoadingTaskRef.current;
+      reviewLoadingTaskRef.current = null;
+      void task?.destroy();
+    };
+  }, [fileBytes, phase, viewerLoadAttempt]);
+
+  useEffect(() => () => {
+    analysisAbortRef.current?.abort();
+    exportAbortRef.current?.abort();
+    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
+  }, []);
 
   const goToPage = (requestedPage: number, behavior: ScrollBehavior = "smooth") => {
     const page = Math.max(1, Math.min(pageCount, requestedPage));
@@ -692,25 +801,29 @@ export default function Home() {
   };
 
   const updatePageFromScroll = () => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const stageBounds = stage.getBoundingClientRect();
-    const focusLine = stageBounds.top + Math.min(stage.clientHeight * .35, 260);
-    let closestPage = activePage;
-    let closestDistance = Number.POSITIVE_INFINITY;
-    stage.querySelectorAll<HTMLElement>("[data-page]").forEach((entry) => {
-      const page = Number(entry.dataset.page);
-      const bounds = entry.getBoundingClientRect();
-      const distance = Math.abs(bounds.top - focusLine);
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestPage = page;
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const stage = stageRef.current;
+      if (!stage) return;
+      const stageBounds = stage.getBoundingClientRect();
+      const focusLine = stageBounds.top + Math.min(stage.clientHeight * .35, 260);
+      let closestPage = activePage;
+      let closestDistance = Number.POSITIVE_INFINITY;
+      stage.querySelectorAll<HTMLElement>("[data-page]").forEach((entry) => {
+        const page = Number(entry.dataset.page);
+        const bounds = entry.getBoundingClientRect();
+        const distance = Math.abs(bounds.top - focusLine);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPage = page;
+        }
+      });
+      if (closestPage !== activePage) {
+        setActivePage(closestPage);
+        setActiveFindingId(null);
       }
     });
-    if (closestPage !== activePage) {
-      setActivePage(closestPage);
-      setActiveFindingId(null);
-    }
   };
 
   const checkpoint = () => {
@@ -825,18 +938,26 @@ export default function Home() {
   }, [activeFindingId, selectedFindingIds.size]);
 
   const analyzeFile = async (file?: File) => {
-    if (!file) return;
+    if (!file || analyzing) return;
     setScannedPdfDetected(false);
     setMessage("");
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
       setMessage("Please choose a PDF document.");
       return;
     }
-    if (file.size > 50 * 1024 * 1024) {
+    if (file.size > MAX_FILE_BYTES) {
       setMessage("Please choose a PDF smaller than 50 MB for reliable local processing.");
       return;
     }
+    const controller = new AbortController();
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = controller;
     setFileName(file.name);
+    setFileBytes(null);
+    setReviewDocument(null);
+    setViewerError("");
+    setPageCount(0);
+    setPageDimensions([]);
     setFindings([]);
     setExtractedLines([]);
     setCustomTerms("");
@@ -855,16 +976,26 @@ export default function Home() {
     setCanUndo(false);
     setCanRedo(false);
     setAnalyzing(true);
+    setAnalysisProgress({ stage: "opening", current: 0, total: 0, detail: "Opening the PDF safely…" });
+    let loadingTask: PdfLoadingTask | null = null;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      setFileBytes(bytes);
+      if (controller.signal.aborted) throw cancellationError();
       let inspectionPromise: Promise<LocalInspection | null> | null = null;
       const pdfjs = await getPdf();
-      const loadingTask = pdfjs.getDocument({ data: bytes.slice() });
+      if (controller.signal.aborted) throw cancellationError();
+      loadingTask = pdfjs.getDocument({ data: bytes.slice() });
       const pdfDocument = await loadingTask.promise;
+      if (controller.signal.aborted) throw cancellationError();
+      if (!pdfDocument.numPages) throw new Error("The PDF has no pages");
+      if (pdfDocument.numPages > MAX_DOCUMENT_PAGES) {
+        throw new Error(`This PDF has ${pdfDocument.numPages} pages. Redactify currently supports up to ${MAX_DOCUMENT_PAGES} pages per document for reliable local processing.`);
+      }
       setPageCount(pdfDocument.numPages);
+      setAnalysisProgress({ stage: "analysing", current: 0, total: pdfDocument.numPages, detail: `Preparing ${pdfDocument.numPages} ${pdfDocument.numPages === 1 ? "page" : "pages"}…` });
       const found = new Map<string, Finding>();
       const documentLines: TextLine[] = [];
+      const dimensions: PageSize[] = [];
       const pagesWithoutText: number[] = [];
       let extractedCharacterCount = 0;
       const registerFinding = ({
@@ -902,8 +1033,11 @@ export default function Home() {
         });
       };
       for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+        if (controller.signal.aborted) throw cancellationError();
+        setAnalysisProgress({ stage: "analysing", current: pageNumber, total: pdfDocument.numPages, detail: `Analysing page ${pageNumber} of ${pdfDocument.numPages}…` });
         const page = await pdfDocument.getPage(pageNumber);
         const viewport = page.getViewport({ scale: 1 });
+        dimensions.push({ width: viewport.width, height: viewport.height });
         const content = await page.getTextContent();
         const pageItems: TextItem[] = [];
         for (const rawItem of content.items) {
@@ -925,7 +1059,8 @@ export default function Home() {
         extractedCharacterCount += pageCharacterCount;
         if (pageCharacterCount === 0) pagesWithoutText.push(pageNumber);
         else if (!inspectionPromise) {
-          inspectionPromise = inspectLocally(bytes).catch((error) => {
+          inspectionPromise = inspectLocally(bytes, controller.signal).catch((error) => {
+            if (isCancellation(error)) throw error;
             console.warn("pdf-inspector was unavailable; continuing with PDF.js", error);
             return null;
           });
@@ -1014,18 +1149,21 @@ export default function Home() {
           });
           lineIndex += addressLines.length - 1;
         }
+        page.cleanup();
+        if (pageNumber % 2 === 0) await nextPaint();
       }
       if (extractedCharacterCount === 0) {
-        await loadingTask.destroy();
         setFileBytes(null);
         setPageCount(0);
+        setPageDimensions([]);
         setInspection(null);
         setScannedPdfDetected(true);
         setMessage("Scanned or image-only PDFs are not supported yet. Redactify needs selectable text to detect sensitive information safely.");
         return;
       }
+      setAnalysisProgress({ stage: "inspecting", current: pdfDocument.numPages, total: pdfDocument.numPages, detail: "Checking document structure and text support…" });
       const localInspection = await (inspectionPromise ?? Promise.resolve(null));
-      await loadingTask.destroy();
+      if (controller.signal.aborted) throw cancellationError();
       const unsupportedPages = new Set([
         ...pagesWithoutText,
         ...(localInspection?.pagesNeedingOcr ?? []),
@@ -1036,24 +1174,47 @@ export default function Home() {
       if (inspectionDetectedScans || unsupportedPages.size > 0) {
         setFileBytes(null);
         setPageCount(0);
+        setPageDimensions([]);
         setInspection(null);
         setScannedPdfDetected(true);
         setMessage("Scanned or image-only PDFs are not supported yet. Redactify needs selectable text to detect sensitive information safely.");
         return;
       }
+      setFileBytes(bytes);
+      setPageDimensions(dimensions);
       setInspection(localInspection);
       setFindings([...found.values()]);
       setExtractedLines(documentLines);
       setMessage(found.size ? "Analysis complete. High-confidence matches are selected; uncertain matches are marked for review." : "No common sensitive patterns were found.");
       setPhase("review");
     } catch (error) {
-      console.error(error);
       setFileBytes(null);
-      setScannedPdfDetected(false);
-      setMessage("This PDF could not be read. Try a standard, non-password-protected PDF.");
+      setPageCount(0);
+      setPageDimensions([]);
+      if (isCancellation(error)) {
+        setScannedPdfDetected(false);
+        setMessage("Analysis cancelled. The document was cleared from this browser tab.");
+      } else {
+        console.error(error);
+        setScannedPdfDetected(false);
+        const detail = error instanceof Error && error.message.startsWith("This PDF has") ? error.message : readablePdfError(error);
+        setMessage(detail);
+      }
     } finally {
-      setAnalyzing(false);
+      if (loadingTask) {
+        try { await loadingTask.destroy(); } catch { /* PDF.js may already be shutting down after cancellation. */ }
+      }
+      if (analysisAbortRef.current === controller) {
+        analysisAbortRef.current = null;
+        setAnalyzing(false);
+        setAnalysisProgress(null);
+      }
     }
+  };
+
+  const cancelAnalysis = () => {
+    analysisAbortRef.current?.abort();
+    setAnalysisProgress((progress) => progress ? { ...progress, detail: "Stopping safely…" } : progress);
   };
 
   const downloadPdfBytes = (bytes: Uint8Array) => {
@@ -1066,21 +1227,37 @@ export default function Home() {
   };
 
   const createRedactedPdf = async () => {
-    if (!fileBytes || !selectedCount) return;
+    if (!fileBytes || !selectedCount || creating) return;
     const selected = findings.filter((finding) => finding.selected);
     const selectedRects = selected.flatMap((finding) => finding.rects);
+    const selectedRectsByPage = new Map<number, Rect[]>();
+    selectedRects.forEach((rect) => {
+      const pageRects = selectedRectsByPage.get(rect.page) || [];
+      pageRects.push(rect);
+      selectedRectsByPage.set(rect.page, pageRects);
+    });
+    const controller = new AbortController();
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = controller;
     setCreating(true);
+    setExportProgress({ stage: "rendering", current: 0, total: pageCount, detail: "Preparing the secure export…" });
     setVerification(null);
     setMessage("Creating and independently verifying a flattened PDF on your device…");
+    let loadingTask: PdfLoadingTask | null = null;
     try {
       const [{ PDFDocument }, pdfjs] = await Promise.all([import("pdf-lib"), getPdf()]);
-      const loadingTask = pdfjs.getDocument({ data: fileBytes.slice() });
+      if (controller.signal.aborted) throw cancellationError();
+      loadingTask = pdfjs.getDocument({ data: fileBytes.slice() });
       const source = await loadingTask.promise;
       const output = await PDFDocument.create();
-      const renderScale = 2;
+      const preferredScale = source.numPages > 80 ? 1.25 : source.numPages > 30 ? 1.55 : 2;
       for (let pageNumber = 1; pageNumber <= source.numPages; pageNumber += 1) {
+        if (controller.signal.aborted) throw cancellationError();
+        setExportProgress({ stage: "rendering", current: pageNumber, total: source.numPages, detail: `Securing page ${pageNumber} of ${source.numPages}…` });
         const page = await source.getPage(pageNumber);
         const pageSize = page.getViewport({ scale: 1 });
+        const pixelSafeScale = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(pageSize.width * pageSize.height, 1));
+        const renderScale = Math.max(1, Math.min(preferredScale, pixelSafeScale));
         const viewport = page.getViewport({ scale: renderScale });
         const canvas = document.createElement("canvas");
         canvas.width = Math.ceil(viewport.width);
@@ -1089,7 +1266,7 @@ export default function Home() {
         if (!context) throw new Error("Canvas unavailable");
         await page.render({ canvas, canvasContext: context, viewport }).promise;
         context.fillStyle = "#111018";
-        selectedRects.filter((rect) => rect.page === pageNumber).forEach((rect) => {
+        (selectedRectsByPage.get(pageNumber) || []).forEach((rect) => {
           const safetyPadding = 1.5;
           context.fillRect(
             Math.max(0, (rect.x - safetyPadding) * renderScale),
@@ -1103,10 +1280,17 @@ export default function Home() {
         output.addPage([pageSize.width, pageSize.height]).drawImage(image, {
           x: 0, y: 0, width: pageSize.width, height: pageSize.height,
         });
+        page.cleanup();
+        canvas.width = 1;
+        canvas.height = 1;
+        if (pageNumber % 2 === 0) await nextPaint();
       }
-      await loadingTask.destroy();
+      if (controller.signal.aborted) throw cancellationError();
       const redactedBytes = Uint8Array.from(await output.save());
-      const result = await verifyRedactedPdf(redactedBytes, selectedRects, pageCount);
+      setExportProgress({ stage: "verifying", current: 0, total: pageCount, detail: "Starting independent safety verification…" });
+      const result = await verifyRedactedPdf(redactedBytes, selectedRects, pageCount, controller.signal, (page, total) => {
+        setExportProgress({ stage: "verifying", current: page, total, detail: `Verifying page ${page} of ${total}…` });
+      });
       setVerification(result);
       if (!result.passed) {
         exportedPdfRef.current = null;
@@ -1118,11 +1302,27 @@ export default function Home() {
       setMessage("Verified: the new PDF contains no extractable source text and every approved region is burned in.");
       setPhase("done");
     } catch (error) {
-      console.error(error);
-      setMessage("The redacted PDF could not be created. Please try again.");
+      if (isCancellation(error)) {
+        setMessage("Export cancelled. No partial PDF was downloaded or stored.");
+      } else {
+        console.error(error);
+        setMessage("The redacted PDF could not be created. Your original remains unchanged; please try again.");
+      }
     } finally {
-      setCreating(false);
+      if (loadingTask) {
+        try { await loadingTask.destroy(); } catch { /* PDF.js may already be shutting down. */ }
+      }
+      if (exportAbortRef.current === controller) {
+        exportAbortRef.current = null;
+        setCreating(false);
+        setExportProgress(null);
+      }
     }
+  };
+
+  const cancelExport = () => {
+    exportAbortRef.current?.abort();
+    setExportProgress((progress) => progress ? { ...progress, detail: "Stopping safely…" } : progress);
   };
 
   const downloadLastExport = () => {
@@ -1130,7 +1330,11 @@ export default function Home() {
   };
 
   const reset = () => {
+    analysisAbortRef.current?.abort();
+    exportAbortRef.current?.abort();
     setPhase("hero"); setFileName(""); setFileBytes(null); setPageCount(0);
+    setPageDimensions([]); setAnalysisProgress(null); setExportProgress(null);
+    setReviewDocument(null); setViewerError("");
     setFindings([]); setExtractedLines([]); setCustomTerms(""); setFilter("All"); setMessage(""); setActivePage(1);
     setScannedPdfDetected(false);
     setZoom(1); setDrawing(false); setPreviewRedactions(false); setActiveFindingId(null); setSelectedFindingIds(new Set());
@@ -1313,7 +1517,8 @@ export default function Home() {
     setMessage("The selected redaction boxes were merged into one editable area per page.");
   };
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault(); setDragging(false); analyzeFile(event.dataTransfer.files[0]);
+    event.preventDefault(); setDragging(false);
+    if (!analyzing) void analyzeFile(event.dataTransfer.files[0]);
   };
   const loadSamplePdf = async () => {
     if (analyzing) return;
@@ -1381,8 +1586,12 @@ export default function Home() {
             <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
             <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
             <div className="upload-copy"><strong>{analyzing ? fileName : dragging ? "Release to analyse" : "Drag & drop your PDF"}</strong><small>{analyzing ? "Your file has not left this browser" : "or click to browse files"}</small></div>
-            {analyzing && <div className="analysis-track"><i /></div>}
+            {analyzing && <div className="analysis-track determinate" aria-hidden="true"><i style={{ width: `${analysisPercent}%` }} /></div>}
           </div>
+          {analyzing && analysisProgress && <div className="analysis-status" role="status" aria-live="polite">
+            <div><strong>{analysisProgress.detail}</strong><span>{analysisProgress.total ? `${analysisPercent}%` : "Starting…"}</span></div>
+            <button type="button" onClick={cancelAnalysis}>Cancel analysis</button>
+          </div>}
           <div className="upload-options"><button type="button" onClick={() => void loadSamplePdf()} disabled={analyzing}>Try with a sample PDF</button><span>Maximum file size: 50 MB</span></div>
           <div className="format-notice"><span aria-hidden="true">i</span><p><strong>Text-based PDFs only.</strong> Scanned or image-only PDFs are not supported yet.</p></div>
           {scannedPdfDetected ? <div className="scanned-pdf-notice" role="alert">
@@ -1436,15 +1645,18 @@ export default function Home() {
               : `All ${inspection.pageCount} pages contain extractable text`}</small>
             {inspection.layout.isComplex && <small>Complex layout detected</small>}
           </div>}
-          <div className="pdf-stage" ref={stageRef} onScroll={updatePageFromScroll}>
+          {viewerError && <div className="viewer-error" role="alert"><span>{viewerError}</span><button type="button" onClick={() => setViewerLoadAttempt((attempt) => attempt + 1)}>Retry viewer</button></div>}
+          <div className="pdf-stage" ref={stageRef} onScroll={updatePageFromScroll} aria-busy={!reviewDocument && !viewerError}>
+            {!reviewDocument && !viewerError && <div className="viewer-starting" role="status">Preparing the document viewer…</div>}
             {fileBytes && Array.from({ length: pageCount }, (_, index) => index + 1).map((pageNumber) => <div
               className="pdf-page-entry"
-              key={`${pageNumber}-${zoom}`}
+              key={pageNumber}
               data-page={pageNumber}
+              style={{ minHeight: (pageDimensions[pageNumber - 1]?.height || 792) * zoom + 44 }}
             >
               <div className="pdf-page-number">Page {pageNumber}</div>
-              <PdfPageView
-                bytes={fileBytes}
+              {reviewDocument && Math.abs(pageNumber - activePage) <= 1 ? <PdfPageView
+                document={reviewDocument}
                 pageNumber={pageNumber}
                 zoom={zoom}
                 findings={findings}
@@ -1460,7 +1672,7 @@ export default function Home() {
                 onUpdateRect={updateRect}
                 onDeleteFinding={removeFinding}
                 onConfirmFinding={(id) => toggle(id, true)}
-              />
+              /> : <div className="pdf-page-placeholder" style={{ width: (pageDimensions[pageNumber - 1]?.width || 612) * zoom, height: (pageDimensions[pageNumber - 1]?.height || 792) * zoom }}><span>Page {pageNumber} will render as you approach it</span></div>}
             </div>)}
           </div>
           <div className="viewer-legend"><span><i className="legend-redact" /> Will redact</span><span><i className="legend-keep" /> Will keep</span><span><i className="legend-manual" /> Manual</span><span className="selection-hint">Drag to multi-select · ⌘/Ctrl-click to add boxes · Delete key to remove</span></div>
@@ -1477,7 +1689,12 @@ export default function Home() {
               <button className="mini-button accept" onClick={acceptAll}>Redact all</button>
               <button className="mini-button" onClick={rejectAll}>Keep all</button>
             </div>
-            <button className="primary-button compact sidebar-export" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? "Creating…" : "Apply & export"} <b>→</b></button>
+            <button className="primary-button compact sidebar-export" onClick={createRedactedPdf} disabled={!selectedCount || creating}>{creating ? exportProgress?.stage === "verifying" ? "Verifying…" : "Creating…" : "Apply & export"} <b>→</b></button>
+            {creating && exportProgress && <div className="export-status" role="status" aria-live="polite">
+              <div><strong>{exportProgress.detail}</strong><span>{exportPercent}%</span></div>
+              <div className="export-track" aria-hidden="true"><i style={{ width: `${exportPercent}%` }} /></div>
+              <button type="button" onClick={cancelExport}>Cancel export</button>
+            </div>}
           </div>
           <section className="exact-text-panel">
             <div><strong>Find exact text</strong><span>Local search</span></div>
