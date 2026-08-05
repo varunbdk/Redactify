@@ -30,8 +30,9 @@ test("server-renders the Redactify product and local-processing promise", async 
 
   const html = await response.text();
   assert.match(html, /<title>Redactify — Local PDF redaction<\/title>/i);
-  assert.match(html, /Redact sensitive details/);
-  assert.match(html, /Keep files on your device/);
+  assert.match(html, /Get sensitive details/);
+  assert.match(html, /redacted instantly/);
+  assert.doesNotMatch(html, /LOCAL PRIVACY SCANNER/);
   assert.match(html, /No document upload/);
   assert.match(html, /does not send the document to our server/);
   assert.match(html, /Text-based PDFs only/);
