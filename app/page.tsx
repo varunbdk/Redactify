@@ -320,8 +320,9 @@ const mergeRectsByVisualLine = (rects: Rect[]) => {
 
 const likelyName = /\b[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3}\b/g;
 const titledName = /\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\b/i;
-const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee|employee name|patient name|insured person)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
-const bareNameLabel = /^\s*(?:name|account name)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\s*$/i;
+const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee|employee name|patient name|insured person)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+(?:[A-Z]\.?|[A-Z][a-zÀ-ÿ'’-]{1,30})){1,3})/i;
+const labelledPersonName = /^(?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+(?:[A-Z]\.?|[A-Z][a-zÀ-ÿ'’-]{1,30})){1,3}$/;
+const bareNameLabel = /^\s*(?:name|account name)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+(?:[A-Z]\.?|[A-Z][a-zÀ-ÿ'’-]{1,30})){1,3})\s*$/i;
 const labelledAccountIdentifier = /^\s*(?:account(?:\s+(?:number|no\.?|id))?|client(?:\s+(?:number|no\.?|id))?|customer(?:\s+(?:number|no\.?|id))?|brokerage account|portfolio(?:\s+(?:number|id))?|user(?:\s+(?:number|id))?|account code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]{3,31})\s*$/i;
 const contextualName = /\b(?:paid to|received(?: from)?|transfer(?:red)? (?:to|from|received)|attention|attn|care of|c\/o)\s*[:#-]?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
 const nameStopPhrases = /^(?:Private Client|Client Details|Transaction Activity|Statement Summary|Test Document|Security Contact|Document Service|Account Statement|Personal Information|Contact Details|Northstar Bank|Residential Address)$/i;
@@ -331,6 +332,11 @@ const isAccountIdentifier = (value: string) => {
   const compact = value.replace(/[._/-]/g, "");
   return /^(?=.*\d)[A-Z0-9]{5,32}$/i.test(compact);
 };
+const tableValueItems = (items: TextItem[], label: TextItem) => items
+  .filter((item) => item !== label
+    && item.rect.x >= label.rect.x + label.rect.width - 4
+    && Math.abs(item.rect.y - label.rect.y) <= Math.max(10, label.rect.height * .9))
+  .sort((a, b) => a.rect.x - b.rect.x);
 
 const addressLabel = /(?<!email )(?<!web )(?<!ip )\b(?:(?:residential|home|mailing|billing|shipping|postal|correspondence|registered|business|office)\s+)?address\b\s*[:#-]?\s*/i;
 const addressAnchor = /\b(?:flat|apartment|apt|suite|unit|floor|house|building|plot|room)?\s*\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square|Crescent|Parkway|Marg|Nagar|Colony|Sector|Layout|Cross|Main)\b[,.]?/i;
@@ -1166,6 +1172,42 @@ export default function Home() {
         const sortedLineHeights = lines.map((line) => line.height).sort((a, b) => a - b);
         const medianLineHeight = sortedLineHeights[Math.floor(sortedLineHeights.length / 2)] || 10;
         documentLines.push(...lines.map((line) => ({ page: pageNumber, text: textForLine(line.items), items: line.items })));
+
+        // Some PDF creators store each table cell as an independent text fragment, even
+        // when it visibly sits on the same row. Inspect nearby right-hand cells so a
+        // simple “Name” or “Account” label is still reliable in those statements.
+        for (const labelItem of pageItems) {
+          const fieldLabel = normalizedValue(labelItem.text);
+          const valueItems = tableValueItems(pageItems, labelItem);
+          if (!valueItems.length) continue;
+          const value = textForLine(valueItems);
+          if ((fieldLabel === "name" || fieldLabel === "account name") && labelledPersonName.test(value) && !businessNameClues.test(value)) {
+            registerFinding({
+              label: value,
+              detector: "Table-labelled person name",
+              kind: "PII",
+              confidence: "high",
+              reason: "Appears in a dedicated Name field in a table.",
+              page: pageNumber,
+              rects: valueItems.map((item) => ({ ...item.rect })),
+            });
+          }
+          if (/^(?:account|account number|account no|account id|client|client number|client id|customer|customer number|customer id|brokerage account|portfolio number|portfolio id|user id|account code)$/.test(fieldLabel)) {
+            const accountItem = valueItems.find((item) => isAccountIdentifier(item.text));
+            if (accountItem) {
+              registerFinding({
+                label: accountItem.text,
+                detector: "Labelled account or client identifier",
+                kind: "Financial",
+                confidence: "high",
+                reason: "Appears in a dedicated account or client field and contains a short alphanumeric identifier.",
+                page: pageNumber,
+                rects: [{ ...accountItem.rect }],
+              });
+            }
+          }
+        }
+
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
           const line = lines[lineIndex];
           const lineText = textForLine(line.items);
