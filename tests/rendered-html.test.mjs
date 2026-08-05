@@ -32,6 +32,12 @@ test("server-renders the Redactify product and local-processing promise", async 
   assert.match(html, /<title>Redactify — Local PDF redaction<\/title>/i);
   assert.match(html, /Get sensitive details/);
   assert.match(html, /redacted,.*instantly!/);
+  assert.match(html, /How it works/);
+  assert.match(html, /Features/);
+  assert.match(html, /Pricing/);
+  assert.match(html, /FAQ/);
+  assert.match(html, /Start redacting, for free/);
+  assert.match(html, /Free while Redactify is in beta/);
   assert.doesNotMatch(html, /LOCAL PRIVACY SCANNER/);
   assert.match(html, /No document upload/);
   assert.match(html, /does not send the document to our server/);
@@ -182,6 +188,9 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.scanned-pdf-notice/);
   assert.match(css, /\.hero-layout/);
   assert.match(css, /\.hero-uploader/);
+  assert.match(css, /\.marketing-nav/);
+  assert.match(css, /\.landing-section/);
+  assert.match(css, /--violet:#c15f3c/);
   assert.match(css, /\.format-notice/);
   assert.match(css, /cursor:crosshair/);
 });
@@ -207,9 +216,9 @@ test("uses the Redactify gradient mark as the site icon", async () => {
     readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
   ]);
 
-  assert.match(layout, /favicon\.svg\?v=2/);
+  assert.match(layout, /favicon\.svg\?v=3/);
   assert.match(favicon, /redactify-gradient/);
-  assert.match(favicon, /#6D4DFF/);
-  assert.match(favicon, /#E8459A/);
+  assert.match(favicon, /#B95537/);
+  assert.match(favicon, /#D97757/);
   assert.equal((favicon.match(/stroke="white"/g) ?? []).length, 3);
 });

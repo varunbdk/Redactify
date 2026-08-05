@@ -1747,21 +1747,26 @@ export default function Home() {
   return <main className="app-shell">
     <nav className="top-nav">
       <button className="brand-button" onClick={() => setPhase("hero")} aria-label="Redactify home"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button>
-      <div className="progress-dots" aria-label={`Step ${phaseIndex + 1} of 3`}>{[0, 1, 2].map((step) => <span key={step} className={step === phaseIndex ? "active" : step < phaseIndex ? "complete" : ""} />)}</div>
-      <button className="nav-action" onClick={focusUploader}>Redact a PDF</button>
+      {phase === "hero" ? <div className="marketing-nav" aria-label="Primary navigation">
+        <a href="#privacy-story">How it works</a>
+        <a href="#features">Features</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#faq">FAQ</a>
+      </div> : <div className="progress-dots" aria-label={`Step ${phaseIndex + 1} of 3`}>{[0, 1, 2].map((step) => <span key={step} className={step === phaseIndex ? "active" : step < phaseIndex ? "complete" : ""} />)}</div>}
+      <button className="nav-action" onClick={focusUploader}>Start redacting, for free</button>
     </nav>
 
     {phase === "hero" && <section className="hero-screen">
       <div className="ambient ambient-one" /><div className="ambient ambient-two" /><div className="ambient ambient-three" />
       <div className="hero-layout">
         <div className="hero-intro">
-          <h1><span>Get sensitive details</span><span>redacted, <em>instantly!</em></span></h1>
+          <h1>Get sensitive details redacted, <em>instantly!</em></h1>
           <p className="hero-copy">Find names, addresses, account details, and other sensitive text. Review every suggestion before creating a permanently redacted copy.</p>
           <div className="hero-actions"><button className="primary-button" onClick={focusUploader}>Choose your PDF <b>→</b></button><a className="secondary-button" href="#privacy-story">How privacy works</a></div>
           <div className="hero-assurances"><span>✓ No account</span><span>✓ No document upload</span><span>✓ You approve every redaction</span></div>
         </div>
         <div className="hero-uploader" id="quick-upload">
-          <div className="uploader-heading"><span>START HERE</span><strong>{analyzing ? "Reading your document…" : "Redact a PDF now"}</strong><p>{analyzing ? "Local detection is running in this browser." : "Drop a searchable, text-based PDF or select one from your device."}</p></div>
+          <div className="uploader-heading"><span>START HERE</span><strong>{analyzing ? "Reading your document…" : "Start redacting, for free"}</strong><p>{analyzing ? "Local detection is running in this browser." : "Drop a searchable, text-based PDF or select one from your device."}</p></div>
           <div className={`upload-card compact-upload ${dragging ? "dragging" : ""} ${analyzing ? "analyzing" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => !analyzing && inputRef.current?.click()} role="button" tabIndex={0} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !analyzing) inputRef.current?.click(); }}>
             <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
             <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
@@ -1782,6 +1787,19 @@ export default function Home() {
         </div>
       </div>
       <div className="privacy-story" id="privacy-story"><article><b>01 — OPEN LOCALLY</b><h2>Your PDF stays in browser memory</h2><p>Redactify does not send the document to our server or create a stored server copy.</p></article><article><b>02 — REVIEW YOURSELF</b><h2>Nothing disappears without approval</h2><p>Inspect, adjust, keep, or remove every suggested redaction before exporting.</p></article><article><b>03 — LEAVE CLEANLY</b><h2>Refreshing clears the workspace</h2><p>The working document lives only in the current browser session. The exported copy downloads directly to your device.</p></article></div>
+      <section className="landing-section" id="features">
+        <span>FEATURES</span><h2>Private PDF redaction, with you in control</h2>
+        <div className="landing-card-grid"><article><b>Local PDF analysis</b><p>Your document is analysed in browser memory and is not uploaded to Redactify.</p></article><article><b>Review every suggestion</b><p>Approve, resize, move, keep, or remove redaction boxes before you export.</p></article><article><b>Permanent redaction</b><p>Approved areas are burned into a rebuilt PDF, followed by an independent security check.</p></article></div>
+      </section>
+      <section className="landing-section pricing-section" id="pricing">
+        <span>PRICING</span><h2>Free while Redactify is in beta</h2><p>Use the local PDF redaction workflow without creating an account.</p><button type="button" className="primary-button" onClick={focusUploader}>Start redacting, for free <b>→</b></button>
+      </section>
+      <section className="landing-section faq-section" id="faq">
+        <span>FAQ</span><h2>Good to know before you begin</h2>
+        <details><summary>Does Redactify upload my PDF?</summary><p>No. Your PDF is processed in browser memory on your device.</p></details>
+        <details><summary>Are scanned PDFs supported?</summary><p>Not yet. Redactify currently supports searchable, text-based PDFs.</p></details>
+        <details><summary>Can I review every suggestion?</summary><p>Yes. You can approve, edit, keep, or delete redaction boxes before exporting.</p></details>
+      </section>
     </section>}
 
     {phase === "review" && <section className="review-screen">

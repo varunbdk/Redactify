@@ -18,22 +18,22 @@ export const metadata: Metadata = {
   description:
     "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
   openGraph: {
-    title: "Redactify — Redact with surgical precision",
+    title: "Redactify — Get sensitive details redacted, instantly!",
     description:
       "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
-    images: ["/og-redesign.png"],
+    images: ["/og-warm.png"],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Redactify — Redact with surgical precision",
+    title: "Redactify — Get sensitive details redacted, instantly!",
     description:
       "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
-    images: ["/og-redesign.png"],
+    images: ["/og-warm.png"],
   },
   icons: {
-    icon: "/favicon.svg?v=2",
-    shortcut: "/favicon.svg?v=2",
-    apple: "/favicon.svg?v=2",
+    icon: "/favicon.svg?v=3",
+    shortcut: "/favicon.svg?v=3",
+    apple: "/favicon.svg?v=3",
   },
 };
 
