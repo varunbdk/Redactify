@@ -321,10 +321,16 @@ const mergeRectsByVisualLine = (rects: Rect[]) => {
 const likelyName = /\b[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3}\b/g;
 const titledName = /\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\b/i;
 const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee|employee name|patient name|insured person)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
+const bareNameLabel = /^\s*(?:name|account name)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\s*$/i;
+const labelledAccountIdentifier = /^\s*(?:account(?:\s+(?:number|no\.?|id))?|client(?:\s+(?:number|no\.?|id))?|customer(?:\s+(?:number|no\.?|id))?|brokerage account|portfolio(?:\s+(?:number|id))?|user(?:\s+(?:number|id))?|account code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]{3,31})\s*$/i;
 const contextualName = /\b(?:paid to|received(?: from)?|transfer(?:red)? (?:to|from|received)|attention|attn|care of|c\/o)\s*[:#-]?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
 const nameStopPhrases = /^(?:Private Client|Client Details|Transaction Activity|Statement Summary|Test Document|Security Contact|Document Service|Account Statement|Personal Information|Contact Details|Northstar Bank|Residential Address)$/i;
 const businessNameClues = /\b(?:bank|limited|ltd|llc|llp|inc|incorporated|corp|corporation|company|co\.?|plc|gmbh|group|partners|foundation|university|college|hospital|clinic|insurance|mutual|capital|holdings|laboratories|labs|market|transit|services|solutions|technologies|association|department|authority)\b/i;
 const nonPersonNameClues = /\b(?:account|address|client|customer|transaction|statement|summary|details|document|invoice|payment|balance|credit|debit|activity|period|reference|security|contact|residential|postal|billing|shipping|avenue|street|road|lane|drive|boulevard|highway|court|square)\b/i;
+const isAccountIdentifier = (value: string) => {
+  const compact = value.replace(/[._/-]/g, "");
+  return /^(?=.*\d)[A-Z0-9]{5,32}$/i.test(compact);
+};
 
 const addressLabel = /(?<!email )(?<!web )(?<!ip )\b(?:(?:residential|home|mailing|billing|shipping|postal|correspondence|registered|business|office)\s+)?address\b\s*[:#-]?\s*/i;
 const addressAnchor = /\b(?:flat|apartment|apt|suite|unit|floor|house|building|plot|room)?\s*\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square|Crescent|Parkway|Marg|Nagar|Colony|Sector|Layout|Cross|Main)\b[,.]?/i;
@@ -1184,8 +1190,23 @@ export default function Home() {
               });
             }
           }
+          const accountMatch = labelledAccountIdentifier.exec(lineText);
+          if (accountMatch?.[1] && isAccountIdentifier(accountMatch[1])) {
+            const accountIdentifier = accountMatch[1];
+            const identifierStart = (accountMatch.index || 0) + accountMatch[0].lastIndexOf(accountIdentifier);
+            registerFinding({
+              label: accountIdentifier,
+              detector: "Labelled account or client identifier",
+              kind: "Financial",
+              confidence: "high",
+              reason: "Appears in a dedicated account or client field and contains a short alphanumeric identifier.",
+              page: pageNumber,
+              rects: rectsForTextRange(line.items, identifierStart, accountIdentifier.length),
+            });
+          }
+
           const lineContainsAddress = addressLabel.test(lineText) || addressAnchor.test(lineText);
-          const labelledMatch = labelledName.exec(lineText);
+          const labelledMatch = labelledName.exec(lineText) || bareNameLabel.exec(lineText);
           const titledMatch = titledName.exec(lineText);
           const contextualMatch = contextualName.exec(lineText);
           if (labelledMatch) {
@@ -1193,10 +1214,10 @@ export default function Home() {
             const nameStart = (labelledMatch.index || 0) + labelledMatch[0].lastIndexOf(name);
             registerFinding({
               label: name,
-              detector: "Labelled person name",
+              detector: "Table-labelled person name",
               kind: "PII",
               confidence: "high",
-              reason: "Appears directly after a person-specific label such as account holder, client, or beneficiary.",
+              reason: "Appears in a dedicated name field, such as an account holder, client, beneficiary, or Name row.",
               page: pageNumber,
               rects: rectsForTextRange(line.items, nameStart, name.length),
             });

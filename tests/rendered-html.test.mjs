@@ -77,7 +77,11 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Indian bank routing code \(IFSC\)/);
   assert.match(page, /UPI payment address/);
   assert.match(page, /Complete address/);
-  assert.match(page, /Labelled person name/);
+  assert.match(page, /bareNameLabel/);
+  assert.match(page, /labelledAccountIdentifier/);
+  assert.match(page, /isAccountIdentifier/);
+  assert.match(page, /Table-labelled person name/);
+  assert.match(page, /Labelled account or client identifier/);
   assert.match(page, /type Confidence = "high" \| "medium" \| "low"/);
   assert.match(page, /confidenceMeta/);
   assert.match(page, /isAadhaarValid/);
