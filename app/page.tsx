@@ -13,7 +13,7 @@ import {
 
 type Category = "PII" | "Financial" | "Identity" | "Network";
 type Phase = "hero" | "review" | "done";
-type Confidence = "high" | "review";
+type Confidence = "high" | "medium" | "low";
 type Rect = { page: number; x: number; y: number; width: number; height: number };
 type Finding = {
   id: string;
@@ -22,8 +22,13 @@ type Finding = {
   detector: string;
   kind: Category;
   confidence: Confidence;
+  reason: string;
+  country?: string;
+  occurrenceCount: number;
   selected: boolean;
   manual?: boolean;
+  reported?: boolean;
+  reportReason?: string;
   rects: Rect[];
 };
 type VerificationResult = {
@@ -57,13 +62,15 @@ type DetectionRule = {
   expression: RegExp;
   confidence: Confidence;
   assess?: (value: string) => Confidence | false;
+  explain: (value: string, confidence: Confidence) => string;
+  country?: string;
+  valueGroup?: number;
 };
 
 const digitsOnly = (value: string) => value.replace(/\D/g, "");
 const normalizedValue = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-const isLuhnValid = (value: string) => {
-  const digits = digitsOnly(value);
-  if (digits.length < 13 || digits.length > 19 || /^(\d)\1+$/.test(digits)) return false;
+const passesLuhn = (digits: string) => {
+  if (!digits || /^(\d)\1+$/.test(digits)) return false;
   let sum = 0;
   let double = false;
   for (let index = digits.length - 1; index >= 0; index -= 1) {
@@ -76,6 +83,10 @@ const isLuhnValid = (value: string) => {
     double = !double;
   }
   return sum % 10 === 0;
+};
+const isLuhnValid = (value: string) => {
+  const digits = digitsOnly(value);
+  return digits.length >= 13 && digits.length <= 19 && passesLuhn(digits);
 };
 const isIbanValid = (value: string) => {
   const compact = value.replace(/\s/g, "").toUpperCase();
@@ -91,20 +102,67 @@ const isPhoneLike = (value: string) => {
   const digits = digitsOnly(value);
   return digits.length >= 7 && digits.length <= 15 && !/^(\d)\1+$/.test(digits);
 };
+const isCanadianSinValid = (value: string) => {
+  const digits = digitsOnly(value);
+  return digits.length === 9 && passesLuhn(digits);
+};
+const isAustralianTfnValid = (value: string) => {
+  const digits = digitsOnly(value);
+  if (digits.length !== 9 || /^(\d)\1+$/.test(digits)) return false;
+  const weights = [1, 4, 3, 7, 5, 8, 6, 9, 10];
+  return [...digits].reduce((sum, digit, index) => sum + Number(digit) * weights[index], 0) % 11 === 0;
+};
+const isNhsNumberValid = (value: string) => {
+  const digits = digitsOnly(value);
+  if (digits.length !== 10 || /^(\d)\1+$/.test(digits)) return false;
+  const total = [...digits.slice(0, 9)].reduce((sum, digit, index) => sum + Number(digit) * (10 - index), 0);
+  const remainder = 11 - (total % 11);
+  const checkDigit = remainder === 11 ? 0 : remainder;
+  return checkDigit !== 10 && checkDigit === Number(digits[9]);
+};
+const verhoeffTable = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+  [2, 3, 4, 0, 1, 7, 8, 9, 5, 6], [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+  [4, 0, 1, 2, 3, 9, 5, 6, 7, 8], [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+  [6, 5, 9, 8, 7, 1, 0, 4, 3, 2], [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+  [8, 7, 6, 5, 9, 3, 2, 1, 0, 4], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+];
+const verhoeffPermutation = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
+  [5, 8, 0, 3, 7, 9, 6, 1, 4, 2], [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+  [9, 4, 5, 3, 1, 2, 6, 8, 7, 0], [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
+  [2, 7, 9, 3, 8, 0, 6, 4, 1, 5], [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
+];
+const isAadhaarValid = (value: string) => {
+  const digits = digitsOnly(value);
+  if (digits.length !== 12 || /^(\d)\1+$/.test(digits)) return false;
+  let checksum = 0;
+  [...digits].reverse().forEach((digit, index) => {
+    checksum = verhoeffTable[checksum][verhoeffPermutation[index % 8][Number(digit)]];
+  });
+  return checksum === 0;
+};
+
+const formatReason = (label: string) => `Matches the expected structure for ${label}.`;
+const validatedReason = (label: string) => `${formatReason(label)} Its checksum or validation rule also passed.`;
 
 const rules: DetectionRule[] = [
-  { kind: "PII", label: "Email address", expression: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, confidence: "high" },
-  { kind: "PII", label: "Phone number", expression: /(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{2,4}\)?[ .-]?)?\d{3,4}[ .-]\d{3,4}(?!\w)/g, confidence: "review", assess: (value) => isPhoneLike(value) ? "review" : false },
-  { kind: "Financial", label: "IBAN", expression: /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g, confidence: "high", assess: (value) => isIbanValid(value) ? "high" : "review" },
-  { kind: "Financial", label: "Payment card or long account number", expression: /\b(?:\d[ -]*?){13,19}\b/g, confidence: "review", assess: (value) => isLuhnValid(value) ? "high" : "review" },
-  { kind: "Financial", label: "Indian bank routing code (IFSC)", expression: /\b[A-Z]{4}0[A-Z0-9]{6}\b/g, confidence: "high" },
-  { kind: "Financial", label: "UPI payment address", expression: /\b[A-Z0-9._-]{2,}@(upi|okaxis|okhdfcbank|oksbi|ybl|paytm|ibl|axl)\b/gi, confidence: "high" },
-  { kind: "Financial", label: "Account or transaction reference", expression: /\b(?:CUST|ACCT|ACC|CARD|UPI-PS|PAY|TRF|REF|POL)[-A-Z0-9/]{5,}\b/gi, confidence: "review" },
-  { kind: "Identity", label: "PAN identity number", expression: /\b[A-Z]{5}\d{4}[A-Z]\b/g, confidence: "high" },
-  { kind: "Identity", label: "Aadhaar-style identity number", expression: /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/g, confidence: "review", assess: (value) => /^(\d)\1+$/.test(digitsOnly(value)) ? false : "review" },
-  { kind: "Identity", label: "US Social Security number", expression: /\b(?!000|666|9\d\d)\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b/g, confidence: "high" },
-  { kind: "Network", label: "IP address", expression: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, confidence: "high", assess: (value) => isIpValid(value) ? "high" : false },
-  { kind: "Network", label: "Web address", expression: /\b(?:https?:\/\/|www\.)[^\s<>()]+/gi, confidence: "high" },
+  { kind: "PII", label: "Email address", expression: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, confidence: "high", explain: () => "Contains a valid-looking mailbox, @ symbol, domain, and top-level domain." },
+  { kind: "PII", label: "Phone number", expression: /(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{2,4}\)?[ .-]?)?\d{3,4}[ .-]\d{3,4}(?!\w)/g, confidence: "medium", assess: (value) => isPhoneLike(value) ? "medium" : false, explain: () => "Contains 7–15 digits in a phone-like layout. Numbering rules vary by country, so review is recommended." },
+  { kind: "Financial", label: "IBAN", expression: /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g, confidence: "high", assess: (value) => isIbanValid(value) ? "high" : "low", explain: (_value, confidence) => confidence === "high" ? validatedReason("an IBAN") : "Looks like an IBAN, but its checksum did not validate. Review it carefully." },
+  { kind: "Financial", label: "Payment card or long account number", expression: /\b(?:\d[ -]*?){13,19}\b/g, confidence: "medium", assess: (value) => isLuhnValid(value) ? "high" : "low", explain: (_value, confidence) => confidence === "high" ? validatedReason("a payment-card number") : "Contains 13–19 grouped digits, but the payment-card checksum did not pass." },
+  { kind: "Financial", label: "Indian bank routing code (IFSC)", expression: /\b[A-Z]{4}0[A-Z0-9]{6}\b/g, confidence: "high", country: "India", explain: () => formatReason("an Indian IFSC bank code") },
+  { kind: "Financial", label: "UPI payment address", expression: /\b[A-Z0-9._-]{2,}@(upi|okaxis|okhdfcbank|oksbi|ybl|paytm|ibl|axl)\b/gi, confidence: "high", country: "India", explain: () => formatReason("an Indian UPI payment address") },
+  { kind: "Financial", label: "Account or transaction reference", expression: /\b(?:CUST|ACCT|ACC|CARD|UPI-PS|PAY|TRF|REF|POL)[-A-Z0-9/]{5,}\b/gi, confidence: "low", explain: () => "Starts with a common account or transaction prefix, but reference formats are organization-specific." },
+  { kind: "Identity", label: "PAN identity number", expression: /\b[A-Z]{5}\d{4}[A-Z]\b/g, confidence: "high", country: "India", explain: () => formatReason("an Indian PAN identity number") },
+  { kind: "Identity", label: "Aadhaar identity number", expression: /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/g, confidence: "medium", country: "India", assess: (value) => isAadhaarValid(value) ? "high" : "medium", explain: (_value, confidence) => confidence === "high" ? validatedReason("an Indian Aadhaar number") : "Has the 12-digit Aadhaar layout, but its checksum did not validate." },
+  { kind: "Identity", label: "US Social Security number", expression: /\b(?!000|666|9\d\d)\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b/g, confidence: "high", country: "United States", explain: () => "Matches the US Social Security number layout and excludes invalid number ranges." },
+  { kind: "Identity", label: "UK National Insurance number", expression: /\b(?:national insurance(?: number)?|NINO|NI number)\s*[:#-]?\s*((?!BG|GB|KN|NK|NT|TN|ZZ)[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]?)\b/gi, valueGroup: 1, confidence: "high", country: "United Kingdom", explain: () => "Appears beside a National Insurance label and matches the UK NINO structure." },
+  { kind: "Identity", label: "UK NHS number", expression: /\b(?:NHS(?: number)?|national health service number)\s*[:#-]?\s*(\d{3}[ -]?\d{3}[ -]?\d{4})\b/gi, valueGroup: 1, confidence: "medium", country: "United Kingdom", assess: (value) => isNhsNumberValid(value) ? "high" : "low", explain: (_value, confidence) => confidence === "high" ? validatedReason("a UK NHS number") : "Appears beside an NHS label, but its checksum did not validate." },
+  { kind: "Identity", label: "Canadian Social Insurance Number", expression: /\b(?:social insurance number|SIN)\s*[:#-]?\s*(\d{3}[ -]?\d{3}[ -]?\d{3})\b/gi, valueGroup: 1, confidence: "medium", country: "Canada", assess: (value) => isCanadianSinValid(value) ? "high" : "low", explain: (_value, confidence) => confidence === "high" ? validatedReason("a Canadian SIN") : "Appears beside a Canadian SIN label, but its checksum did not validate." },
+  { kind: "Identity", label: "Australian Tax File Number", expression: /\b(?:tax file number|TFN)\s*[:#-]?\s*(\d{3}[ -]?\d{3}[ -]?\d{3})\b/gi, valueGroup: 1, confidence: "medium", country: "Australia", assess: (value) => isAustralianTfnValid(value) ? "high" : "low", explain: (_value, confidence) => confidence === "high" ? validatedReason("an Australian TFN") : "Appears beside an Australian TFN label, but its checksum did not validate." },
+  { kind: "Network", label: "IP address", expression: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, confidence: "high", assess: (value) => isIpValid(value) ? "high" : false, explain: () => "Contains four valid IPv4 number groups, each between 0 and 255." },
+  { kind: "Network", label: "Web address", expression: /\b(?:https?:\/\/|www\.)[^\s<>()]+/gi, confidence: "high", explain: () => formatReason("a web address") },
 ];
 
 let pdfModule: Promise<typeof import("pdfjs-dist/legacy/build/pdf.mjs")> | null = null;
@@ -247,8 +305,13 @@ const mergeRectsOnLine = (rects: Rect[]) => {
 };
 const mergeRectsByVisualLine = (rects: Rect[]) => {
   const groups: Rect[][] = [];
-  for (const rect of rects) {
-    const group = groups.find((candidate) => candidate[0].page === rect.page && Math.abs(candidate[0].y - rect.y) <= Math.max(4, rect.height * .55));
+  for (const rect of [...rects].sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x)) {
+    const group = groups.find((candidate) => {
+      const last = candidate.at(-1)!;
+      const sameLine = last.page === rect.page && Math.abs(last.y - rect.y) <= Math.max(4, rect.height * .55);
+      const nearby = rect.x - (last.x + last.width) <= Math.max(12, rect.height * 1.4);
+      return sameLine && nearby;
+    });
     if (group) group.push(rect);
     else groups.push([rect]);
   }
@@ -256,12 +319,25 @@ const mergeRectsByVisualLine = (rects: Rect[]) => {
 };
 
 const likelyName = /\b[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3}\b/g;
-const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee)\s*:?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
-const nameStopPhrases = /^(?:Private Client|Client Details|Transaction Activity|Statement Summary|Test Document|Northstar Bank|Residential Address)$/i;
+const titledName = /\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\b/i;
+const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee|employee name|patient name|insured person)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
+const contextualName = /\b(?:paid to|received(?: from)?|transfer(?:red)? (?:to|from|received)|attention|attn|care of|c\/o)\s*[:#-]?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
+const nameStopPhrases = /^(?:Private Client|Client Details|Transaction Activity|Statement Summary|Test Document|Security Contact|Document Service|Account Statement|Personal Information|Contact Details|Northstar Bank|Residential Address)$/i;
+const businessNameClues = /\b(?:bank|limited|ltd|llc|llp|inc|incorporated|corp|corporation|company|co\.?|plc|gmbh|group|partners|foundation|university|college|hospital|clinic|insurance|mutual|capital|holdings|laboratories|labs|market|transit|services|solutions|technologies|association|department|authority)\b/i;
+const nonPersonNameClues = /\b(?:account|address|client|customer|transaction|statement|summary|details|document|invoice|payment|balance|credit|debit|activity|period|reference|security|contact|residential|postal|billing|shipping|avenue|street|road|lane|drive|boulevard|highway|court|square)\b/i;
 
-const addressAnchor = /\b\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square)\b[,.]?/i;
-const addressContinuation = /(?:\b[A-Z]{1,3}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b(?:apartment|apt|suite|unit|floor|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|usa|canada|australia)\b|^[A-Za-zÀ-ÿ.'’, -]{3,55}$)/i;
-const addressStop = /\b(?:transaction|date|description|amount|balance|statement|invoice|subtotal|total|iban|account|email|phone)\b/i;
+const addressLabel = /(?<!email )(?<!web )(?<!ip )\b(?:(?:residential|home|mailing|billing|shipping|postal|correspondence|registered|business|office)\s+)?address\b\s*[:#-]?\s*/i;
+const addressAnchor = /\b(?:flat|apartment|apt|suite|unit|floor|house|building|plot|room)?\s*\d{1,6}[A-Za-z]?(?:\s*[-/]\s*\d{1,6})?\s+[A-Za-z0-9.'’ -]{2,80}\b(?:Avenue|Ave|Street|St|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Highway|Hwy|Way|Court|Ct|Place|Pl|Terrace|Close|Square|Crescent|Parkway|Marg|Nagar|Colony|Sector|Layout|Cross|Main)\b[,.]?/i;
+const postalCode = /(?:\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b[A-Z]\d[A-Z][ -]?\d[A-Z]\d\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b\d{4}\b)/i;
+const addressContinuation = /(?:\b(?:apartment|apt|suite|unit|floor|building|district|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|united states|usa|canada|australia|germany|france|spain|italy|singapore|uae)\b|[,;]|^[A-Za-zÀ-ÿ.'’ -]{3,55}$)/i;
+const addressStop = /\b(?:transaction|date|description|amount|balance|statement|invoice|subtotal|total|iban|account(?: number)?|email|phone|telephone|tax|identity|reference|period)\b/i;
+const confidenceRank: Record<Confidence, number> = { low: 1, medium: 2, high: 3 };
+const confidenceMeta: Record<Confidence, { label: string; summary: string }> = {
+  high: { label: "HIGH", summary: "Strong pattern, label, or checksum evidence. Selected automatically." },
+  medium: { label: "MEDIUM", summary: "Good contextual evidence, but human review is recommended." },
+  low: { label: "LOW", summary: "Weak or partially validated evidence. Not selected automatically." },
+};
+const incorrectSuggestionReasons = ["Not sensitive", "Wrong type", "Wrong text area", "Business or heading", "Other"] as const;
 
 const canvasToPngBytes = (canvas: HTMLCanvasElement) => new Promise<Uint8Array>((resolve, reject) => {
   canvas.toBlob(async (blob) => {
@@ -726,6 +802,7 @@ export default function Home() {
   const [previewRedactions, setPreviewRedactions] = useState(false);
   const [activeFindingId, setActiveFindingId] = useState<string | null>(null);
   const [selectedFindingIds, setSelectedFindingIds] = useState<Set<string>>(() => new Set());
+  const [reportingFindingId, setReportingFindingId] = useState<string | null>(null);
   const [inspection, setInspection] = useState<LocalInspection | null>(null);
   const [verification, setVerification] = useState<VerificationResult | null>(null);
   const [canUndo, setCanUndo] = useState(false);
@@ -736,7 +813,7 @@ export default function Home() {
 
   const selectedCount = findings.filter((finding) => finding.selected).length;
   const bulkSelectionCount = selectedFindingIds.size;
-  const reviewCount = findings.filter((finding) => finding.confidence === "review").length;
+  const reviewCount = findings.filter((finding) => finding.confidence !== "high").length;
   const analysisPercent = analysisProgress?.total
     ? Math.max(3, Math.round((analysisProgress.current / analysisProgress.total) * 100))
     : 8;
@@ -1003,6 +1080,8 @@ export default function Home() {
         detector,
         kind,
         confidence,
+        reason,
+        country,
         page,
         rects,
       }: {
@@ -1010,15 +1089,23 @@ export default function Home() {
         detector: string;
         kind: Category;
         confidence: Confidence;
+        reason: string;
+        country?: string;
         page: number;
         rects: Rect[];
       }) => {
         if (!rects.length || !normalizedValue(label)) return;
+        const groupedRects = mergeRectsByVisualLine(rects);
         const key = `${kind}:${detector}:${normalizedValue(label)}`;
         const existing = found.get(key);
         if (existing) {
-          existing.rects.push(...rects);
-          if (confidence === "high") existing.confidence = "high";
+          existing.rects = mergeRectsByVisualLine([...existing.rects, ...groupedRects]);
+          existing.occurrenceCount += 1;
+          if (confidenceRank[confidence] > confidenceRank[existing.confidence]) {
+            existing.confidence = confidence;
+            existing.reason = reason;
+            existing.selected = confidence === "high";
+          }
           return;
         }
         found.set(key, {
@@ -1028,8 +1115,11 @@ export default function Home() {
           detector,
           kind,
           confidence,
+          reason,
+          country,
+          occurrenceCount: 1,
           selected: confidence === "high",
-          rects,
+          rects: groupedRects,
         });
       };
       for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
@@ -1067,6 +1157,8 @@ export default function Home() {
         }
 
         const lines = groupTextLines(pageItems);
+        const sortedLineHeights = lines.map((line) => line.height).sort((a, b) => a - b);
+        const medianLineHeight = sortedLineHeights[Math.floor(sortedLineHeights.length / 2)] || 10;
         documentLines.push(...lines.map((line) => ({ page: pageNumber, text: textForLine(line.items), items: line.items })));
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
           const line = lines[lineIndex];
@@ -1074,20 +1166,28 @@ export default function Home() {
           for (const rule of rules) {
             rule.expression.lastIndex = 0;
             for (const match of lineText.matchAll(rule.expression)) {
-              const value = match[0];
+              const value = rule.valueGroup ? match[rule.valueGroup] : match[0];
+              if (!value) continue;
+              if (rule.label === "Phone number" && /\b(?:aadhaar|identity|social security|social insurance|NHS|NINO|SIN|TFN|national insurance|account|iban|card|tax|reference|postcode|postal|zip)\b/i.test(lineText)) continue;
               const confidence = rule.assess?.(value) ?? rule.confidence;
               if (!confidence) continue;
+              const valueStart = (match.index || 0) + match[0].lastIndexOf(value);
               registerFinding({
                 label: value,
                 detector: rule.label,
                 kind: rule.kind,
                 confidence,
+                reason: rule.explain(value, confidence),
+                country: rule.country,
                 page: pageNumber,
-                rects: mergeRectsOnLine(rectsForTextRange(line.items, match.index || 0, value.length)),
+                rects: rectsForTextRange(line.items, valueStart, value.length),
               });
             }
           }
+          const lineContainsAddress = addressLabel.test(lineText) || addressAnchor.test(lineText);
           const labelledMatch = labelledName.exec(lineText);
+          const titledMatch = titledName.exec(lineText);
+          const contextualMatch = contextualName.exec(lineText);
           if (labelledMatch) {
             const name = labelledMatch[1];
             const nameStart = (labelledMatch.index || 0) + labelledMatch[0].lastIndexOf(name);
@@ -1096,54 +1196,91 @@ export default function Home() {
               detector: "Labelled person name",
               kind: "PII",
               confidence: "high",
+              reason: "Appears directly after a person-specific label such as account holder, client, or beneficiary.",
               page: pageNumber,
-              rects: mergeRectsOnLine(rectsForTextRange(line.items, nameStart, name.length)),
+              rects: rectsForTextRange(line.items, nameStart, name.length),
             });
-          } else {
+          } else if (titledMatch && !businessNameClues.test(titledMatch[1])) {
+            const name = titledMatch[1];
+            const nameStart = (titledMatch.index || 0) + titledMatch[0].lastIndexOf(name);
+            registerFinding({
+              label: name,
+              detector: "Titled person name",
+              kind: "PII",
+              confidence: "high",
+              reason: "A personal title such as Mr, Ms, or Dr appears immediately before this name.",
+              page: pageNumber,
+              rects: rectsForTextRange(line.items, nameStart, name.length),
+            });
+          } else if (contextualMatch && !businessNameClues.test(contextualMatch[1])) {
+            const name = contextualMatch[1];
+            const nameStart = (contextualMatch.index || 0) + contextualMatch[0].lastIndexOf(name);
+            registerFinding({
+              label: name,
+              detector: "Contextual person name",
+              kind: "PII",
+              confidence: "medium",
+              reason: "Appears after wording that normally introduces a person, such as paid to, received from, or attention.",
+              page: pageNumber,
+              rects: rectsForTextRange(line.items, nameStart, name.length),
+            });
+          } else if (!lineContainsAddress) {
             likelyName.lastIndex = 0;
             for (const match of lineText.matchAll(likelyName)) {
               const name = match[0];
-              if (nameStopPhrases.test(name)) continue;
+              const coversMostOfLine = normalizedValue(name).length >= normalizedValue(lineText).length * .8;
+              const looksLikeHeading = coversMostOfLine && line.height > medianLineHeight * 1.25;
+              if (nameStopPhrases.test(name) || businessNameClues.test(name) || nonPersonNameClues.test(name) || looksLikeHeading) continue;
               registerFinding({
                 label: name,
-                detector: "Possible person or organization name",
+                detector: "Possible person name",
                 kind: "PII",
-                confidence: "review",
+                confidence: "low",
+                reason: "Uses person-name capitalization and word structure, but no nearby label confirms it is a person.",
                 page: pageNumber,
-                rects: mergeRectsOnLine(rectsForTextRange(line.items, match.index || 0, name.length)),
+                rects: rectsForTextRange(line.items, match.index || 0, name.length),
               });
             }
           }
 
+          const labelMatch = addressLabel.exec(lineText);
           const addressMatch = addressAnchor.exec(lineText);
-          if (!addressMatch) continue;
-          const addressStart = addressMatch.index || 0;
-          const matchedEnd = addressStart + addressMatch[0].length;
+          if (!labelMatch && !addressMatch) continue;
+          const labelledValueStart = labelMatch ? (labelMatch.index || 0) + labelMatch[0].length : -1;
+          const addressStart = labelledValueStart >= 0 && lineText.slice(labelledValueStart).trim().length >= 3
+            ? labelledValueStart
+            : addressMatch?.index ?? lineText.length;
+          const matchedEnd = addressMatch ? (addressMatch.index || 0) + addressMatch[0].length : addressStart;
           const inlineTail = lineText.slice(matchedEnd).trim();
-          const includeInlineTail = inlineTail.length > 0 && inlineTail.length <= 100 && !addressStop.test(inlineTail) && addressContinuation.test(inlineTail);
-          const firstAddressEnd = includeInlineTail ? lineText.length : matchedEnd;
+          const includeInlineTail = Boolean(labelMatch) || (inlineTail.length > 0 && inlineTail.length <= 120 && !addressStop.test(inlineTail) && (addressContinuation.test(inlineTail) || postalCode.test(inlineTail)));
+          const firstAddressEnd = includeInlineTail ? lineText.length : Math.max(matchedEnd, addressStart);
           const addressLines = [line];
           let previous = line;
-          for (let offset = 1; offset <= 3 && lineIndex + offset < lines.length; offset += 1) {
+          for (let offset = 1; offset <= 5 && lineIndex + offset < lines.length; offset += 1) {
             const candidate = lines[lineIndex + offset];
             const candidateText = textForLine(candidate.items);
             const gap = candidate.y - (previous.y + previous.height);
-            if (gap > Math.max(18, previous.height * 1.8) || addressStop.test(candidateText) || !addressContinuation.test(candidateText)) break;
+            const continuationEvidence = addressContinuation.test(candidateText) || postalCode.test(candidateText);
+            if (gap > Math.max(22, previous.height * 2.1) || addressStop.test(candidateText) || !continuationEvidence) break;
             addressLines.push(candidate);
             previous = candidate;
           }
           const firstAddress = lineText.slice(addressStart, firstAddressEnd).trim();
           const continuationText = addressLines.slice(1).map((addressLine) => textForLine(addressLine.items));
-          const value = [firstAddress, ...continuationText].join(", ");
+          const value = [firstAddress, ...continuationText].filter(Boolean).join(", ");
+          if (!value || normalizedValue(value).length < 5) continue;
           const addressRects = [
-            ...mergeRectsOnLine(rectsForTextRange(line.items, addressStart, firstAddressEnd - addressStart)),
-            ...addressLines.slice(1).flatMap((addressLine) => mergeRectsOnLine(addressLine.items.map((item) => ({ ...item.rect })))),
+            ...rectsForTextRange(line.items, addressStart, firstAddressEnd - addressStart),
+            ...addressLines.slice(1).flatMap((addressLine) => addressLine.items.map((item) => ({ ...item.rect }))),
           ];
           registerFinding({
             label: value,
             detector: "Complete address",
             kind: "PII",
-            confidence: "high",
+            confidence: labelMatch ? "high" : "medium",
+            reason: labelMatch
+              ? `Appears beside an address label and groups ${addressLines.length} adjacent postal ${addressLines.length === 1 ? "line" : "lines"} into one finding.`
+              : `Matches a street-address structure and groups ${addressLines.length} adjacent postal ${addressLines.length === 1 ? "line" : "lines"}.`,
             page: pageNumber,
             rects: addressRects,
           });
@@ -1337,7 +1474,7 @@ export default function Home() {
     setReviewDocument(null); setViewerError("");
     setFindings([]); setExtractedLines([]); setCustomTerms(""); setFilter("All"); setMessage(""); setActivePage(1);
     setScannedPdfDetected(false);
-    setZoom(1); setDrawing(false); setPreviewRedactions(false); setActiveFindingId(null); setSelectedFindingIds(new Set());
+    setZoom(1); setDrawing(false); setPreviewRedactions(false); setActiveFindingId(null); setSelectedFindingIds(new Set()); setReportingFindingId(null);
     setInspection(null); setVerification(null);
     exportedPdfRef.current = null;
     occurrenceRef.current.clear();
@@ -1346,8 +1483,8 @@ export default function Home() {
     setCanUndo(false);
     setCanRedo(false);
   };
-  const toggle = (id: string, selected: boolean) => { checkpoint(); setFindings((items) => items.map((item) => item.id === id ? { ...item, selected } : item)); };
-  const acceptAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: true }))); };
+  const toggle = (id: string, selected: boolean) => { checkpoint(); setFindings((items) => items.map((item) => item.id === id ? { ...item, selected, ...(selected ? { reported: false, reportReason: undefined } : {}) } : item)); };
+  const acceptAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: true, reported: false, reportReason: undefined }))); };
   const rejectAll = () => { checkpoint(); setFindings((items) => items.map((item) => ({ ...item, selected: false }))); };
   const activateFinding = (id: string, additive: boolean) => {
     if (!additive) {
@@ -1379,7 +1516,7 @@ export default function Home() {
   const approveSelectedFindings = () => {
     if (!selectedFindingIds.size) return;
     checkpoint();
-    setFindings((items) => items.map((item) => selectedFindingIds.has(item.id) ? { ...item, selected: true } : item));
+    setFindings((items) => items.map((item) => selectedFindingIds.has(item.id) ? { ...item, selected: true, reported: false, reportReason: undefined } : item));
     setMessage(`${selectedFindingIds.size} selected ${selectedFindingIds.size === 1 ? "box is" : "boxes are"} approved for redaction.`);
   };
   const deleteSelectedFindings = () => {
@@ -1397,18 +1534,24 @@ export default function Home() {
     activateFinding(finding.id, false);
   };
   const showNextOccurrence = (finding: Finding) => {
+    const navigationRects = finding.detector === "Complete address"
+      ? finding.rects.filter((rect, index, rects) => {
+          const previous = rects[index - 1];
+          return !previous || previous.page !== rect.page || rect.y - (previous.y + previous.height) > Math.max(24, rect.height * 2.2);
+        })
+      : finding.rects;
     const current = occurrenceRef.current.get(finding.id) ?? 0;
-    const next = (current + 1) % finding.rects.length;
+    const next = (current + 1) % Math.max(navigationRects.length, 1);
     occurrenceRef.current.set(finding.id, next);
-    const page = finding.rects[next]?.page;
+    const page = navigationRects[next]?.page;
     if (page) goToPage(page);
     activateFinding(finding.id, false);
-    setMessage(`Showing occurrence ${next + 1} of ${finding.rects.length}.`);
+    setMessage(`Showing occurrence ${next + 1} of ${finding.occurrenceCount}.`);
   };
   const selectSimilar = (finding: Finding) => {
     checkpoint();
     const matching = findings.filter((item) => !item.manual && item.detector === finding.detector);
-    setFindings((items) => items.map((item) => item.manual || item.detector !== finding.detector ? item : { ...item, selected: true }));
+    setFindings((items) => items.map((item) => item.manual || item.detector !== finding.detector ? item : { ...item, selected: true, reported: false, reportReason: undefined }));
     setMessage(`${matching.length} ${finding.detector.toLowerCase()} ${matching.length === 1 ? "finding" : "findings"} selected.`);
   };
   const findAndRedactCustomText = () => {
@@ -1425,6 +1568,7 @@ export default function Home() {
     ]));
     for (const term of terms) {
       const rects: Rect[] = [];
+      let matches = 0;
       const needle = term.toLocaleLowerCase();
       for (const items of pageItems.values()) {
         const haystack = items.map((item) => item.text).join(" ").toLocaleLowerCase();
@@ -1432,6 +1576,7 @@ export default function Home() {
         while (start <= haystack.length - needle.length) {
           const matchIndex = haystack.indexOf(needle, start);
           if (matchIndex < 0) break;
+          matches += 1;
           rects.push(...mergeRectsByVisualLine(rectsForTextRange(items, matchIndex, term.length)));
           start = matchIndex + Math.max(needle.length, 1);
         }
@@ -1444,8 +1589,10 @@ export default function Home() {
           detector: "Custom exact text",
           kind: "PII",
           confidence: "high",
+          reason: "Entered explicitly by you and matched exactly in the PDF text layer.",
+          occurrenceCount: matches,
           selected: true,
-          rects,
+          rects: mergeRectsByVisualLine(rects),
         });
       }
     }
@@ -1463,7 +1610,7 @@ export default function Home() {
     const ids = new Set(customFindings.map((finding) => finding.id));
     setSelectedFindingIds(ids);
     setActiveFindingId(ids.size === 1 ? [...ids][0] : null);
-    const occurrenceCount = customFindings.reduce((total, finding) => total + finding.rects.length, 0);
+    const occurrenceCount = customFindings.reduce((total, finding) => total + finding.occurrenceCount, 0);
     setMessage(`${occurrenceCount} ${occurrenceCount === 1 ? "occurrence" : "occurrences"} found and selected for redaction.`);
   };
   const addManualRect = (rect: Rect) => {
@@ -1476,6 +1623,8 @@ export default function Home() {
       detector: "Manual selection",
       kind: "PII",
       confidence: "high",
+      reason: "Drawn manually by you on the PDF page.",
+      occurrenceCount: 1,
       selected: true,
       manual: true,
       rects: [rect],
@@ -1493,6 +1642,17 @@ export default function Home() {
       return next;
     });
     if (activeFindingId === id) setActiveFindingId(null);
+  };
+  const reportIncorrectFinding = (id: string, reportReason: string) => {
+    checkpoint();
+    setFindings((items) => items.map((item) => item.id === id ? {
+      ...item,
+      selected: false,
+      reported: true,
+      reportReason,
+    } : item));
+    setReportingFindingId(null);
+    setMessage("Marked as an incorrect suggestion for this browser session. No PDF text or report was sent anywhere.");
   };
   const updateRect = (findingId: string, rectIndex: number, rect: Rect) => {
     setFindings((items) => items.map((item) => item.id !== findingId ? item : {
@@ -1718,7 +1878,7 @@ export default function Home() {
           <div className="suggestion-list">
             {filteredFindings.map((finding, index) => <article
               id={`finding-${finding.id}`}
-              className={`suggestion-card ${finding.selected ? "selected" : "kept"} ${activeFindingId === finding.id ? "active" : ""} ${selectedFindingIds.has(finding.id) ? "bulk-active" : ""}`}
+              className={`suggestion-card ${finding.selected ? "selected" : "kept"} ${finding.reported ? "reported" : ""} ${activeFindingId === finding.id ? "active" : ""} ${selectedFindingIds.has(finding.id) ? "bulk-active" : ""}`}
               key={finding.id}
               style={{ animationDelay: `${Math.min(index * 35, 350)}ms` }}
               onClick={(event) => {
@@ -1726,17 +1886,26 @@ export default function Home() {
                 else showFinding(finding);
               }}
             >
-              <div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.manual ? "MANUAL" : finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.rects.length > 1 ? ` · ${finding.rects.length} matches` : ""}</small><span className={`confidence-badge ${finding.confidence}`}>{finding.confidence === "high" ? "VALIDATED" : "CHECK"}</span><button type="button" className="locate-button" onClick={(event) => { event.stopPropagation(); showFinding(finding); }}>Jump to match</button></div>
+              <div className="suggestion-meta"><span className={categoryMeta[finding.kind].className}>{finding.manual ? "MANUAL" : finding.detail.split(" · ")[0].toUpperCase()}</span><small>p.{finding.rects[0]?.page}{finding.occurrenceCount > 1 ? ` · ${finding.occurrenceCount} occurrences` : finding.rects.length > 1 ? " · multi-line" : ""}</small>{finding.country && <span className="country-badge">{finding.country}</span>}<span className={`confidence-badge ${finding.confidence}`} title={confidenceMeta[finding.confidence].summary}>{confidenceMeta[finding.confidence].label}</span><button type="button" className="locate-button" onClick={(event) => { event.stopPropagation(); showFinding(finding); }}>Jump to match</button></div>
               <code>{finding.label}</code>
-              <p>{finding.manual ? "Drawn by you on the real PDF page." : finding.confidence === "high" ? "Pattern and format checks passed locally." : "Possible sensitive data — confirm this suggestion before redacting."} Drag the box to move it; drag any edge or corner to resize it.</p>
+              <div className="detection-explanation"><strong>Why detected</strong><span>{finding.reason}</span><small>{confidenceMeta[finding.confidence].summary}</small></div>
+              <p className="edit-hint">Drag the box to move it; drag any edge or corner to resize it.</p>
+              {finding.reported && <div className="reported-notice">Marked incorrect for this session{finding.reportReason ? ` · ${finding.reportReason}` : ""}</div>}
               <div className="choice-row">
                 <button className={finding.selected ? "active-redact" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, true); }}>✓ Redact</button>
                 <button className={!finding.selected ? "active-keep" : ""} onClick={(event) => { event.stopPropagation(); toggle(finding.id, false); }}>× Keep</button>
                 {!finding.manual && <button onClick={(event) => { event.stopPropagation(); selectSimilar(finding); }}>Select similar</button>}
-                {finding.rects.length > 1 && <button onClick={(event) => { event.stopPropagation(); showNextOccurrence(finding); }}>Next match</button>}
+                {finding.occurrenceCount > 1 && <button onClick={(event) => { event.stopPropagation(); showNextOccurrence(finding); }}>Next match</button>}
                 {finding.rects.length > 1 && <button onClick={(event) => { event.stopPropagation(); mergeFindingRects(finding.id); }}>Merge boxes</button>}
                 <button className="remove-finding" aria-label={`Remove ${finding.label}`} onClick={(event) => { event.stopPropagation(); removeFinding(finding.id); }}>Delete</button>
               </div>
+              {!finding.manual && !finding.reported && <button type="button" className="report-incorrect" onClick={(event) => { event.stopPropagation(); setReportingFindingId((current) => current === finding.id ? null : finding.id); }}>Report incorrect suggestion</button>}
+              {reportingFindingId === finding.id && <div className="incorrect-report-panel" role="group" aria-label="Reason this suggestion is incorrect" onClick={(event) => event.stopPropagation()}>
+                <strong>What went wrong?</strong>
+                <span>This feedback stays in this browser session. No document text is sent.</span>
+                <div>{incorrectSuggestionReasons.map((reason) => <button type="button" key={reason} onClick={() => reportIncorrectFinding(finding.id, reason)}>{reason}</button>)}</div>
+                <button type="button" className="cancel-report" onClick={() => setReportingFindingId(null)}>Cancel</button>
+              </div>}
             </article>)}
             {!filteredFindings.length && <div className="no-suggestions"><strong>No findings here.</strong><span>Use “Draw redaction” to mark anything you want to remove manually.</span></div>}
           </div>
