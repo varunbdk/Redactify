@@ -1755,7 +1755,7 @@ export default function Home() {
       <div className="ambient ambient-one" /><div className="ambient ambient-two" /><div className="ambient ambient-three" />
       <div className="hero-layout">
         <div className="hero-intro">
-          <h1><span>Get sensitive details</span><em>redacted instantly</em></h1>
+          <h1><span>Get sensitive details</span><span>redacted, <em>instantly!</em></span></h1>
           <p className="hero-copy">Find names, addresses, account details, and other sensitive text. Review every suggestion before creating a permanently redacted copy.</p>
           <div className="hero-actions"><button className="primary-button" onClick={focusUploader}>Choose your PDF <b>→</b></button><a className="secondary-button" href="#privacy-story">How privacy works</a></div>
           <div className="hero-assurances"><span>✓ No account</span><span>✓ No document upload</span><span>✓ You approve every redaction</span></div>
