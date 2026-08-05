@@ -154,3 +154,16 @@ test("integrates the local pdf-inspector WebAssembly worker", async () => {
   assert.match(page, /LOCAL RUST\/WASM INSPECTOR/);
   assert.match(page, /pagesNeedingOcr/);
 });
+
+test("uses the Redactify gradient mark as the site icon", async () => {
+  const [layout, favicon] = await Promise.all([
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(layout, /favicon\.svg\?v=2/);
+  assert.match(favicon, /redactify-gradient/);
+  assert.match(favicon, /#6D4DFF/);
+  assert.match(favicon, /#E8459A/);
+  assert.equal((favicon.match(/stroke="white"/g) ?? []).length, 3);
+});

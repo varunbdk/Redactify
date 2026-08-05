@@ -31,8 +31,9 @@ export const metadata: Metadata = {
     images: ["/og-redesign.png"],
   },
   icons: {
-    icon: "/favicon.svg",
-    shortcut: "/favicon.svg",
+    icon: "/favicon.svg?v=2",
+    shortcut: "/favicon.svg?v=2",
+    apple: "/favicon.svg?v=2",
   },
 };
 
