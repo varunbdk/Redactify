@@ -31,9 +31,9 @@ export const metadata: Metadata = {
     images: ["/og-warm.png"],
   },
   icons: {
-    icon: "/favicon.svg?v=3",
-    shortcut: "/favicon.svg?v=3",
-    apple: "/favicon.svg?v=3",
+    icon: "/favicon.svg?v=4",
+    shortcut: "/favicon.svg?v=4",
+    apple: "/favicon.svg?v=4",
   },
 };
 
