@@ -38,6 +38,10 @@ test("server-renders the Redactify product and local-processing promise", async 
   assert.match(html, /FAQ/);
   assert.match(html, /Start redacting, for free/);
   assert.match(html, /Free while Redactify is in beta/);
+  assert.match(html, /Legal professionals/);
+  assert.match(html, /Financial services professionals/);
+  assert.match(html, /Recruiters/);
+  assert.match(html, /Individuals/);
   assert.doesNotMatch(html, /LOCAL PRIVACY SCANNER/);
   assert.match(html, /No document upload/);
   assert.match(html, /does not send the document to our server/);
@@ -190,6 +194,8 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(css, /\.hero-uploader/);
   assert.match(css, /\.marketing-nav/);
   assert.match(css, /\.landing-section/);
+  assert.match(css, /\.site-footer/);
+  assert.match(css, /\.footer-main/);
   assert.match(css, /--violet:#c15f3c/);
   assert.match(css, /\.format-notice/);
   assert.match(css, /cursor:crosshair/);

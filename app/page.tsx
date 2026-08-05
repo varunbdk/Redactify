@@ -1800,6 +1800,16 @@ export default function Home() {
         <details><summary>Are scanned PDFs supported?</summary><p>Not yet. Redactify currently supports searchable, text-based PDFs.</p></details>
         <details><summary>Can I review every suggestion?</summary><p>Yes. You can approve, edit, keep, or delete redaction boxes before exporting.</p></details>
       </section>
+      <footer className="site-footer" aria-label="Redactify footer">
+        <div className="footer-main">
+          <div className="footer-brand"><button className="brand-button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Back to the top"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button><p>Redact sensitive details privately, directly from your device.</p></div>
+          <div className="footer-column"><strong>Product</strong><a href="#privacy-story">How it works</a><a href="#features">Features</a><a href="#pricing">Pricing</a></div>
+          <div className="footer-column"><strong>Resources</strong><a href="#faq">FAQ</a><a href="#quick-upload">Text-based PDFs</a><a href="#privacy-story">Privacy promise</a></div>
+          <div className="footer-column"><strong>For</strong><span>Legal professionals</span><span>Financial services professionals</span><span>Recruiters</span><span>Individuals</span></div>
+          <div className="footer-column"><strong>Company</strong><a href="#privacy-story">Privacy</a><a href="#faq">Terms of use</a><a href="#faq">Cookies</a></div>
+        </div>
+        <div className="footer-bottom"><span>© 2026 Redactify. All rights reserved.</span><span>Local PDF redaction</span></div>
+      </footer>
     </section>}
 
     {phase === "review" && <section className="review-screen">
