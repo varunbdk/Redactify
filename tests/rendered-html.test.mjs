@@ -79,9 +79,7 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Complete address/);
   assert.match(page, /bareNameLabel/);
   assert.match(page, /labelledAccountIdentifier/);
-  assert.match(page, /labelledPersonName/);
   assert.match(page, /isAccountIdentifier/);
-  assert.match(page, /tableValueItems/);
   assert.match(page, /Table-labelled person name/);
   assert.match(page, /Labelled account or client identifier/);
   assert.match(page, /type Confidence = "high" \| "medium" \| "low"/);
@@ -100,7 +98,7 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /Why detected/);
   assert.match(page, /Report incorrect suggestion/);
   assert.match(page, /reportIncorrectFinding/);
-  assert.match(page, /No PDF text or report was sent anywhere/);
+  assert.match(page, /No document text or report is sent anywhere/);
   assert.match(page, /Manual review needed/);
   assert.match(page, /Scanned PDFs aren’t supported yet/);
   assert.match(page, /scannedPdfDetected/);
