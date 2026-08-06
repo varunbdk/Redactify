@@ -1243,7 +1243,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
       if (controller.signal.aborted) throw cancellationError();
       if (!pdfDocument.numPages) throw new Error("The PDF has no pages");
       if (pdfDocument.numPages > MAX_DOCUMENT_PAGES) {
-        throw new Error(`This PDF has ${pdfDocument.numPages} pages. Redactify currently supports up to ${MAX_DOCUMENT_PAGES} pages per document for reliable local processing.`);
+        throw new Error(`This PDF has ${pdfDocument.numPages} pages. helpredact.com currently supports up to ${MAX_DOCUMENT_PAGES} pages per document for reliable local processing.`);
       }
       setPageCount(pdfDocument.numPages);
       setAnalysisProgress({ stage: "analysing", current: 0, total: pdfDocument.numPages, detail: `Preparing ${pdfDocument.numPages} ${pdfDocument.numPages === 1 ? "page" : "pages"}…` });
@@ -1500,7 +1500,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
         setPageDimensions([]);
         setInspection(null);
         setScannedPdfDetected(true);
-        setMessage("Scanned or image-only PDFs are not supported yet. Redactify needs selectable text to detect sensitive information safely.");
+        setMessage("Scanned or image-only PDFs are not supported yet. helpredact.com needs selectable text to detect sensitive information safely.");
         return;
       }
       setAnalysisProgress({ stage: "inspecting", current: pdfDocument.numPages, total: pdfDocument.numPages, detail: "Checking document structure and text support…" });
@@ -1519,7 +1519,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
         setPageDimensions([]);
         setInspection(null);
         setScannedPdfDetected(true);
-        setMessage("Scanned or image-only PDFs are not supported yet. Redactify needs selectable text to detect sensitive information safely.");
+        setMessage("Scanned or image-only PDFs are not supported yet. helpredact.com needs selectable text to detect sensitive information safely.");
         return;
       }
       setFileBytes(bytes);
@@ -1895,7 +1895,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
       const bold = await sample.embedFont(StandardFonts.HelveticaBold);
       const drawPage = (title: string, lines: string[]) => {
         const page = sample.addPage([612, 792]);
-        page.drawText("REDACTIFY SAMPLE — FICTIONAL DATA", { x: 54, y: 738, size: 10, font: bold, color: rgb(.42, .3, 1) });
+        page.drawText("HELPREDACT.COM SAMPLE — FICTIONAL DATA", { x: 54, y: 738, size: 10, font: bold, color: rgb(.42, .3, 1) });
         page.drawText(title, { x: 54, y: 694, size: 22, font: bold, color: rgb(.09, .06, .23) });
         lines.forEach((line, index) => page.drawText(line, { x: 54, y: 642 - index * 34, size: 12, font: regular, color: rgb(.16, .14, .26) }));
       };
@@ -1916,7 +1916,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
         "This sample contains fictional information for product testing only.",
       ]);
       const bytes = await sample.save();
-      const file = new File([bytes.slice().buffer as ArrayBuffer], "redactify-sample.pdf", { type: "application/pdf" });
+      const file = new File([bytes.slice().buffer as ArrayBuffer], "helpredact-sample.pdf", { type: "application/pdf" });
       await analyzeFile(file);
     } catch (error) {
       console.error(error);
@@ -1952,7 +1952,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
 
   return <main className="app-shell">
     <nav className="top-nav">
-      <button className="brand-button" onClick={() => audiencePage ? window.location.assign("/") : setPhase("hero")} aria-label="Redactify home"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button>
+      <button className="brand-button" onClick={() => audiencePage ? window.location.assign("/") : setPhase("hero")} aria-label="helpredact.com home"><span className="brand-icon"><i /><i /><i /></span><strong>helpredact.com</strong></button>
       {phase === "hero" ? <div className="marketing-nav" aria-label="Primary navigation">
         <a href="#privacy-story">How it works</a>
         <a href="#features">Features</a>
@@ -1971,7 +1971,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
           <p className="hero-copy">{audiencePage.description}</p>
           <ul>{audiencePage.benefits.map((benefit) => <li key={benefit}><span>✓</span>{benefit}</li>)}</ul>
           <div className="audience-trust"><strong>Simple to use</strong><span>No document upload</span><span>You approve every redaction</span></div>
-          {(audienceKey === "chatgpt-users" || audienceKey === "claude-users") && <small className="independence-note">Redactify is an independent tool and is not affiliated with {audienceKey === "chatgpt-users" ? "OpenAI" : "Anthropic"}.</small>}
+          {(audienceKey === "chatgpt-users" || audienceKey === "claude-users") && <small className="independence-note">helpredact.com is an independent tool and is not affiliated with {audienceKey === "chatgpt-users" ? "OpenAI" : "Anthropic"}.</small>}
         </div> : <div className="hero-intro">
           <h1>Get sensitive details redacted, <em>instantly!</em></h1>
           <p className="hero-copy">Find names, addresses, account details, and other sensitive text. Review every suggestion before creating a permanently redacted copy.</p>
@@ -1980,29 +1980,29 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
         </div>}
         {uploaderPanel}
       </div>
-      <div className="privacy-story" id="privacy-story"><article><b>01 — OPEN LOCALLY</b><h2>Your PDF stays in browser memory</h2><p>Redactify does not send the document to our server or create a stored server copy.</p></article><article><b>02 — REVIEW YOURSELF</b><h2>Nothing disappears without approval</h2><p>Inspect, adjust, keep, or remove every suggested redaction before exporting.</p></article><article><b>03 — LEAVE CLEANLY</b><h2>Refreshing clears the workspace</h2><p>The working document lives only in the current browser session. The exported copy downloads directly to your device.</p></article></div>
+      <div className="privacy-story" id="privacy-story"><article><b>01 — OPEN LOCALLY</b><h2>Your PDF stays in browser memory</h2><p>helpredact.com does not send the document to our server or create a stored server copy.</p></article><article><b>02 — REVIEW YOURSELF</b><h2>Nothing disappears without approval</h2><p>Inspect, adjust, keep, or remove every suggested redaction before exporting.</p></article><article><b>03 — LEAVE CLEANLY</b><h2>Refreshing clears the workspace</h2><p>The working document lives only in the current browser session. The exported copy downloads directly to your device.</p></article></div>
       <section className="landing-section" id="features">
         <span>FEATURES</span><h2>Private PDF redaction, with you in control</h2>
-        <div className="landing-card-grid"><article><b>Local PDF analysis</b><p>Your document is analysed in browser memory and is not uploaded to Redactify.</p></article><article><b>Review every suggestion</b><p>Approve, resize, move, keep, or remove redaction boxes before you export.</p></article><article><b>Permanent redaction</b><p>Approved areas are burned into a rebuilt PDF, followed by an independent security check.</p></article></div>
+        <div className="landing-card-grid"><article><b>Local PDF analysis</b><p>Your document is analysed in browser memory and is not uploaded to helpredact.com.</p></article><article><b>Review every suggestion</b><p>Approve, resize, move, keep, or remove redaction boxes before you export.</p></article><article><b>Permanent redaction</b><p>Approved areas are burned into a rebuilt PDF, followed by an independent security check.</p></article></div>
       </section>
       <section className="landing-section pricing-section" id="pricing">
-        <span>PRICING</span><h2>Free while Redactify is in beta</h2><p>Use the local PDF redaction workflow without creating an account.</p><button type="button" className="primary-button" onClick={focusUploader}>Start redacting, for free <b>→</b></button>
+        <span>PRICING</span><h2>Free while helpredact.com is in beta</h2><p>Use the local PDF redaction workflow without creating an account.</p><button type="button" className="primary-button" onClick={focusUploader}>Start redacting, for free <b>→</b></button>
       </section>
       <section className="landing-section faq-section" id="faq">
         <span>FAQ</span><h2>Good to know before you begin</h2>
-        <details><summary>Does Redactify upload my PDF?</summary><p>No. Your PDF is processed in browser memory on your device.</p></details>
-        <details><summary>Are scanned PDFs supported?</summary><p>Not yet. Redactify currently supports searchable, text-based PDFs.</p></details>
+        <details><summary>Does helpredact.com upload my PDF?</summary><p>No. Your PDF is processed in browser memory on your device.</p></details>
+        <details><summary>Are scanned PDFs supported?</summary><p>Not yet. helpredact.com currently supports searchable, text-based PDFs.</p></details>
         <details><summary>Can I review every suggestion?</summary><p>Yes. You can approve, edit, keep, or delete redaction boxes before exporting.</p></details>
       </section>
-      <footer className="site-footer" id="site-footer" aria-label="Redactify footer">
+      <footer className="site-footer" id="site-footer" aria-label="helpredact.com footer">
         <div className="footer-main">
-          <div className="footer-brand"><button className="brand-button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Back to the top"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button><p>Redact sensitive details privately, directly from your device.</p></div>
+          <div className="footer-brand"><button className="brand-button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Back to the top"><span className="brand-icon"><i /><i /><i /></span><strong>helpredact.com</strong></button><p>Redact sensitive details privately, directly from your device.</p></div>
           <div className="footer-column"><strong>Product</strong><a href="#privacy-story">How it works</a><a href="#features">Features</a><a href="#pricing">Pricing</a></div>
           <div className="footer-column"><strong>Resources</strong><a href="#faq">FAQ</a><a href="#quick-upload">Text-based PDFs</a><a href="#privacy-story">Privacy promise</a></div>
           <div className="footer-column"><strong>For</strong><a href="/?for=chatgpt-users">ChatGPT Users</a><a href="/?for=claude-users">Claude Users</a><a href="/?for=legal-professionals">Legal professionals</a><a href="/?for=financial-services-professionals">Financial services professionals</a><a href="/?for=recruiters">Recruiters</a></div>
           <div className="footer-column"><strong>Company</strong><a href="#privacy-story">Privacy</a><a href="#faq">Terms of use</a><a href="#faq">Cookies</a></div>
         </div>
-        <div className="footer-bottom"><span>© 2026 Redactify. All rights reserved.</span><span>Local PDF redaction</span></div>
+        <div className="footer-bottom"><span>© 2026 helpredact.com. All rights reserved.</span><span>Local PDF redaction</span></div>
       </footer>
     </section>}
 
