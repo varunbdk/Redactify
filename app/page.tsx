@@ -10,6 +10,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { audiencePages } from "./audience-pages";
+import type { AudienceKey } from "./audience-pages";
 
 type Category = "PII" | "Financial" | "Identity" | "Network";
 type Phase = "hero" | "review" | "done";
@@ -365,6 +367,7 @@ type StatementFieldCandidate = {
   page: number;
   rects: Rect[];
 };
+
 const statementFieldKind = (value: string): StatementFieldKind | null => {
   const label = value.toLocaleLowerCase().replace(/[.:#_-]+/g, " ").replace(/\s+/g, " ").trim();
   if (/^(?:name|full name|holder name|account holder|account owner|account name|client name|customer name|beneficiary|payee)$/.test(label)) return "name";
@@ -943,7 +946,7 @@ function PdfPageView({
   </div>;
 }
 
-export default function Home() {
+export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const historyRef = useRef<Finding[][]>([]);
   const redoRef = useRef<Finding[][]>([]);
@@ -1925,10 +1928,31 @@ export default function Home() {
     requestAnimationFrame(() => document.getElementById("quick-upload")?.scrollIntoView({ behavior: "smooth", block: "center" }));
   };
   const phaseIndex = phase === "hero" ? 0 : phase === "review" ? 1 : 2;
+  const audiencePage = audienceKey ? audiencePages[audienceKey] : null;
+  const uploaderPanel = <div className="hero-uploader" id="quick-upload">
+    <div className="uploader-heading"><span>START HERE</span><strong>{analyzing ? "Reading your document…" : "Start redacting, for free"}</strong><p>{analyzing ? "Local detection is running in this browser." : "Drop a searchable, text-based PDF or select one from your device."}</p></div>
+    <div className={`upload-card compact-upload ${dragging ? "dragging" : ""} ${analyzing ? "analyzing" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => !analyzing && inputRef.current?.click()} role="button" tabIndex={0} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !analyzing) inputRef.current?.click(); }}>
+      <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
+      <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
+      <div className="upload-copy"><strong>{analyzing ? fileName : dragging ? "Release to analyse" : "Drag & drop your PDF"}</strong><small>{analyzing ? "Your file has not left this browser" : "or click to browse files"}</small></div>
+      {analyzing && <div className="analysis-track determinate" aria-hidden="true"><i style={{ width: `${analysisPercent}%` }} /></div>}
+    </div>
+    {analyzing && analysisProgress && <div className="analysis-status" role="status" aria-live="polite">
+      <div><strong>{analysisProgress.detail}</strong><span>{analysisProgress.total ? `${analysisPercent}%` : "Starting…"}</span></div>
+      <button type="button" onClick={cancelAnalysis}>Cancel analysis</button>
+    </div>}
+    <div className="upload-options"><button type="button" onClick={() => void loadSamplePdf()} disabled={analyzing}>Try with a sample PDF</button><span>Maximum file size: 50 MB</span></div>
+    <div className="format-notice"><span aria-hidden="true">i</span><p><strong>Text-based PDFs only.</strong> Scanned or image-only PDFs are not supported yet.</p></div>
+    {scannedPdfDetected ? <div className="scanned-pdf-notice" role="alert">
+      <span aria-hidden="true">!</span>
+      <div><strong>Scanned PDFs aren’t supported yet</strong><p>{message} Try exporting it as a searchable, text-based PDF and upload it again.</p></div>
+      <button type="button" onClick={() => { setScannedPdfDetected(false); setMessage(""); inputRef.current?.click(); }}>Choose another PDF</button>
+    </div> : message && <div className="inline-message" role="status">{message}</div>}
+  </div>;
 
   return <main className="app-shell">
     <nav className="top-nav">
-      <button className="brand-button" onClick={() => setPhase("hero")} aria-label="Redactify home"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button>
+      <button className="brand-button" onClick={() => audiencePage ? window.location.assign("/") : setPhase("hero")} aria-label="Redactify home"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button>
       {phase === "hero" ? <div className="marketing-nav" aria-label="Primary navigation">
         <a href="#privacy-story">How it works</a>
         <a href="#features">Features</a>
@@ -1938,35 +1962,23 @@ export default function Home() {
       <button className="nav-action" onClick={focusUploader}>Start redacting, for free</button>
     </nav>
 
-    {phase === "hero" && <section className="hero-screen">
+    {phase === "hero" && <section className={`hero-screen ${audiencePage ? "audience-screen" : ""}`}>
       <div className="ambient ambient-one" /><div className="ambient ambient-two" /><div className="ambient ambient-three" />
-      <div className="hero-layout">
-        <div className="hero-intro">
+      <div className={`hero-layout ${audiencePage ? "audience-layout" : ""}`}>
+        {audiencePage ? <div className="audience-intro">
+          <span className="audience-kicker">{audiencePage.eyebrow}</span>
+          <h1>{audiencePage.title}</h1>
+          <p className="hero-copy">{audiencePage.description}</p>
+          <ul>{audiencePage.benefits.map((benefit) => <li key={benefit}><span>✓</span>{benefit}</li>)}</ul>
+          <div className="audience-trust"><strong>Simple to use</strong><span>No document upload</span><span>You approve every redaction</span></div>
+          {(audienceKey === "chatgpt-users" || audienceKey === "claude-users") && <small className="independence-note">Redactify is an independent tool and is not affiliated with {audienceKey === "chatgpt-users" ? "OpenAI" : "Anthropic"}.</small>}
+        </div> : <div className="hero-intro">
           <h1>Get sensitive details redacted, <em>instantly!</em></h1>
           <p className="hero-copy">Find names, addresses, account details, and other sensitive text. Review every suggestion before creating a permanently redacted copy.</p>
           <div className="hero-actions"><button className="primary-button" onClick={focusUploader}>Choose your PDF <b>→</b></button><a className="secondary-button" href="#privacy-story">How privacy works</a></div>
           <div className="hero-assurances"><span>✓ No account</span><span>✓ No document upload</span><span>✓ You approve every redaction</span></div>
-        </div>
-        <div className="hero-uploader" id="quick-upload">
-          <div className="uploader-heading"><span>START HERE</span><strong>{analyzing ? "Reading your document…" : "Start redacting, for free"}</strong><p>{analyzing ? "Local detection is running in this browser." : "Drop a searchable, text-based PDF or select one from your device."}</p></div>
-          <div className={`upload-card compact-upload ${dragging ? "dragging" : ""} ${analyzing ? "analyzing" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => !analyzing && inputRef.current?.click()} role="button" tabIndex={0} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !analyzing) inputRef.current?.click(); }}>
-            <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const nextFile = event.target.files?.[0]; event.target.value = ""; void analyzeFile(nextFile); }} />
-            <div className="upload-orb"><span>{analyzing ? "✦" : "↑"}</span></div>
-            <div className="upload-copy"><strong>{analyzing ? fileName : dragging ? "Release to analyse" : "Drag & drop your PDF"}</strong><small>{analyzing ? "Your file has not left this browser" : "or click to browse files"}</small></div>
-            {analyzing && <div className="analysis-track determinate" aria-hidden="true"><i style={{ width: `${analysisPercent}%` }} /></div>}
-          </div>
-          {analyzing && analysisProgress && <div className="analysis-status" role="status" aria-live="polite">
-            <div><strong>{analysisProgress.detail}</strong><span>{analysisProgress.total ? `${analysisPercent}%` : "Starting…"}</span></div>
-            <button type="button" onClick={cancelAnalysis}>Cancel analysis</button>
-          </div>}
-          <div className="upload-options"><button type="button" onClick={() => void loadSamplePdf()} disabled={analyzing}>Try with a sample PDF</button><span>Maximum file size: 50 MB</span></div>
-          <div className="format-notice"><span aria-hidden="true">i</span><p><strong>Text-based PDFs only.</strong> Scanned or image-only PDFs are not supported yet.</p></div>
-          {scannedPdfDetected ? <div className="scanned-pdf-notice" role="alert">
-            <span aria-hidden="true">!</span>
-            <div><strong>Scanned PDFs aren’t supported yet</strong><p>{message} Try exporting it as a searchable, text-based PDF and upload it again.</p></div>
-            <button type="button" onClick={() => { setScannedPdfDetected(false); setMessage(""); inputRef.current?.click(); }}>Choose another PDF</button>
-          </div> : message && <div className="inline-message" role="status">{message}</div>}
-        </div>
+        </div>}
+        {uploaderPanel}
       </div>
       <div className="privacy-story" id="privacy-story"><article><b>01 — OPEN LOCALLY</b><h2>Your PDF stays in browser memory</h2><p>Redactify does not send the document to our server or create a stored server copy.</p></article><article><b>02 — REVIEW YOURSELF</b><h2>Nothing disappears without approval</h2><p>Inspect, adjust, keep, or remove every suggested redaction before exporting.</p></article><article><b>03 — LEAVE CLEANLY</b><h2>Refreshing clears the workspace</h2><p>The working document lives only in the current browser session. The exported copy downloads directly to your device.</p></article></div>
       <section className="landing-section" id="features">
@@ -1987,7 +1999,7 @@ export default function Home() {
           <div className="footer-brand"><button className="brand-button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Back to the top"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button><p>Redact sensitive details privately, directly from your device.</p></div>
           <div className="footer-column"><strong>Product</strong><a href="#privacy-story">How it works</a><a href="#features">Features</a><a href="#pricing">Pricing</a></div>
           <div className="footer-column"><strong>Resources</strong><a href="#faq">FAQ</a><a href="#quick-upload">Text-based PDFs</a><a href="#privacy-story">Privacy promise</a></div>
-          <div className="footer-column"><strong>For</strong><span>Legal professionals</span><span>Financial services professionals</span><span>Recruiters</span><span>Individuals</span></div>
+          <div className="footer-column"><strong>For</strong><a href="/for/chatgpt-users">ChatGPT Users</a><a href="/for/claude-users">Claude Users</a><a href="/for/legal-professionals">Legal professionals</a><a href="/for/financial-services-professionals">Financial services professionals</a><a href="/for/recruiters">Recruiters</a></div>
           <div className="footer-column"><strong>Company</strong><a href="#privacy-story">Privacy</a><a href="#faq">Terms of use</a><a href="#faq">Cookies</a></div>
         </div>
         <div className="footer-bottom"><span>© 2026 Redactify. All rights reserved.</span><span>Local PDF redaction</span></div>
@@ -2147,4 +2159,8 @@ export default function Home() {
 
     {phase === "done" && <section className="done-screen"><div className="done-glow" /><div className="done-check">✓</div><div className="section-kicker success-kicker">LOCAL EXPORT VERIFIED</div><h1>Redaction complete.</h1><p>{selectedCount} sensitive {selectedCount === 1 ? "item was" : "items were"} burned into a rebuilt PDF and verified before download.</p>{verification && <div className="verification-card"><div><span>✓</span><strong>Post-export safety check passed</strong></div><ul><li><b>{verification.pageCount}</b> pages rebuilt from pixels</li><li><b>{verification.extractedCharacters}</b> extractable source characters remain</li><li><b>{verification.checkedTerms}</b> sensitive text values checked for leakage</li><li><b>{verification.checkedRegions}/{verification.totalRegions}</b> approved regions verified dark</li></ul><small>The download starts only after every approved value is absent from the text layer and the exported copy passes the visual-region check.</small></div>}<div className="done-actions"><button className="primary-button success-button" onClick={downloadLastExport}>↓ Download again</button><button className="secondary-button" onClick={reset}>Process another document</button></div><div className="stat-grid"><article><strong>{selectedCount}</strong><small>ITEMS REDACTED</small></article><article><strong>{findings.length}</strong><small>ITEMS REVIEWED</small></article><article><strong>{pageCount}</strong><small>PAGES VERIFIED</small></article></div><div className="done-note">The original PDF was not modified or uploaded. Verification also ran only in this browser.</div></section>}
   </main>;
+}
+
+export default function Home() {
+  return <RedactifyExperience />;
 }

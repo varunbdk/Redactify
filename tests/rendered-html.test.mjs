@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
+async function render(path = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
-    new Request("http://localhost/", {
+    new Request(`http://localhost${path}`, {
       headers: { accept: "text/html" },
     }),
     {
@@ -41,13 +41,34 @@ test("server-renders the Redactify product and local-processing promise", async 
   assert.match(html, /Legal professionals/);
   assert.match(html, /Financial services professionals/);
   assert.match(html, /Recruiters/);
-  assert.match(html, /Individuals/);
+  assert.match(html, /ChatGPT Users/);
+  assert.match(html, /Claude Users/);
+  assert.doesNotMatch(html, />Individuals</);
   assert.doesNotMatch(html, /LOCAL PRIVACY SCANNER/);
   assert.match(html, /No document upload/);
   assert.match(html, /does not send the document to our server/);
   assert.match(html, /Text-based PDFs only/);
   assert.match(html, /Try with a sample PDF/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
+});
+
+test("serves audience pages with tailored copy and a working local upload CTA", async () => {
+  const routes = [
+    ["/for/chatgpt-users", /sharing a PDF with ChatGPT/],
+    ["/for/claude-users", /sharing a PDF with Claude/],
+    ["/for/legal-professionals", /Prepare legal documents/],
+    ["/for/financial-services-professionals", /Redact financial documents/],
+    ["/for/recruiters", /Share candidate documents/],
+  ];
+  for (const [route, expected] of routes) {
+    const response = await render(route);
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, expected);
+    assert.match(html, /Start redacting, for free/);
+    assert.match(html, /Drag &amp; drop your PDF/);
+    assert.match(html, /No document upload/);
+  }
 });
 
 test("includes real-page review and manual-redaction capabilities", async () => {
