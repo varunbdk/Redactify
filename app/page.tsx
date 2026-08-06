@@ -35,6 +35,8 @@ type VerificationResult = {
   passed: boolean;
   pageCount: number;
   extractedCharacters: number;
+  checkedTerms: number;
+  leakedTerms: string[];
   checkedRegions: number;
   totalRegions: number;
 };
@@ -317,19 +319,35 @@ const mergeRectsByVisualLine = (rects: Rect[]) => {
   }
   return groups.flatMap(mergeRectsOnLine);
 };
+const rectOverlapRatio = (first: Rect, second: Rect) => {
+  if (first.page !== second.page) return 0;
+  const width = Math.max(0, Math.min(first.x + first.width, second.x + second.width) - Math.max(first.x, second.x));
+  const height = Math.max(0, Math.min(first.y + first.height, second.y + second.height) - Math.max(first.y, second.y));
+  const smallerArea = Math.max(1, Math.min(first.width * first.height, second.width * second.height));
+  return width * height / smallerArea;
+};
 
-const likelyName = /\b[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3}\b/g;
-const titledName = /\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\b/i;
-const labelledName = /\b(?:account holder|client name|customer name|full name|beneficiary|recipient|payee|employee name|patient name|insured person)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
-const bareNameLabel = /^\s*(?:name|account name)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?[A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})\s*$/i;
-const labelledAccountIdentifier = /^\s*(?:account(?:\s+(?:number|no\.?|id))?|client(?:\s+(?:number|no\.?|id))?|customer(?:\s+(?:number|no\.?|id))?|brokerage account|portfolio(?:\s+(?:number|id))?|user(?:\s+(?:number|id))?|account code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]{3,31})\s*$/i;
+const personNamePart = String.raw`(?:\p{Lu}[\p{L}'’-]{1,30}|\p{Lu}\.?)`;
+const personNamePattern = `${personNamePart}(?:\\s+${personNamePart}){1,4}`;
+const likelyName = new RegExp(String.raw`\b${personNamePattern}\b`, "gu");
+const titledName = new RegExp(String.raw`\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+(${personNamePattern})\b`, "iu");
+const labelledName = new RegExp(String.raw`\b(?:account holder|account owner|client name|customer name|full name|beneficiary|recipient|payee|employee name|patient name|insured person)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?${personNamePattern})`, "iu");
+const bareNameLabel = new RegExp(String.raw`^\s*(?:name|account name|holder name)\s*[:#-]?\s+((?:(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+)?${personNamePattern})\s*$`, "iu");
+const labelledAccountIdentifier = /^\s*(?:account(?:\s+(?:number|no\.?|id))?|a\/?c(?:\s+(?:number|no\.?))?|acct(?:\s+(?:number|no\.?|id))?|client(?:\s+(?:number|no\.?|id))?|customer(?:\s+(?:number|no\.?|id))?|brokerage account|portfolio(?:\s+(?:number|id))?|user(?:\s+(?:number|id))?|account code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9 ._/-]{3,33})\s*$/i;
 const contextualName = /\b(?:paid to|received(?: from)?|transfer(?:red)? (?:to|from|received)|attention|attn|care of|c\/o)\s*[:#-]?\s+([A-Z][a-zÀ-ÿ'’-]{1,30}(?:\s+[A-Z][a-zÀ-ÿ'’-]{1,30}){1,3})/i;
 const nameStopPhrases = /^(?:Private Client|Client Details|Transaction Activity|Statement Summary|Test Document|Security Contact|Document Service|Account Statement|Personal Information|Contact Details|Northstar Bank|Residential Address)$/i;
 const businessNameClues = /\b(?:bank|limited|ltd|llc|llp|inc|incorporated|corp|corporation|company|co\.?|plc|gmbh|group|partners|foundation|university|college|hospital|clinic|insurance|mutual|capital|holdings|laboratories|labs|market|transit|services|solutions|technologies|association|department|authority)\b/i;
 const nonPersonNameClues = /\b(?:account|address|client|customer|transaction|statement|summary|details|document|invoice|payment|balance|credit|debit|activity|period|reference|security|contact|residential|postal|billing|shipping|avenue|street|road|lane|drive|boulevard|highway|court|square)\b/i;
 const isAccountIdentifier = (value: string) => {
-  const compact = value.replace(/[._/-]/g, "");
+  const compact = value.replace(/[\s._/-]/g, "");
   return /^(?=.*\d)[A-Z0-9]{5,32}$/i.test(compact);
+};
+const isPersonName = (value: string) => {
+  const clean = value.replace(/^(?:Mr|Mrs|Ms|Miss|Dr|Prof)\.?\s+/i, "").trim();
+  const parts = clean.split(/\s+/);
+  if (parts.length < 2 || parts.length > 5 || /\d/.test(clean)) return false;
+  if (businessNameClues.test(clean) || nonPersonNameClues.test(clean) || nameStopPhrases.test(clean)) return false;
+  return parts.every((part) => /^(?:\p{Lu}[\p{L}'’-]{1,30}|\p{Lu}\.?)$/u.test(part));
 };
 
 const addressLabel = /(?<!email )(?<!web )(?<!ip )\b(?:(?:residential|home|mailing|billing|shipping|postal|correspondence|registered|business|office)\s+)?address\b\s*[:#-]?\s*/i;
@@ -337,6 +355,137 @@ const addressAnchor = /\b(?:flat|apartment|apt|suite|unit|floor|house|building|p
 const postalCode = /(?:\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b[A-Z]\d[A-Z][ -]?\d[A-Z]\d\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b|\b\d{4}\b)/i;
 const addressContinuation = /(?:\b(?:apartment|apt|suite|unit|floor|building|district|city|state|province|county|postcode|postal|zip|india|united kingdom|uk|united states|usa|canada|australia|germany|france|spain|italy|singapore|uae)\b|[,;]|^[A-Za-zÀ-ÿ.'’ -]{3,55}$)/i;
 const addressStop = /\b(?:transaction|date|description|amount|balance|statement|invoice|subtotal|total|iban|account(?: number)?|email|phone|telephone|tax|identity|reference|period)\b/i;
+type StatementFieldKind = "name" | "account" | "iban" | "address" | "reference";
+type StatementFieldCandidate = {
+  label: string;
+  detector: string;
+  kind: Category;
+  confidence: Confidence;
+  reason: string;
+  page: number;
+  rects: Rect[];
+};
+const statementFieldKind = (value: string): StatementFieldKind | null => {
+  const label = value.toLocaleLowerCase().replace(/[.:#_-]+/g, " ").replace(/\s+/g, " ").trim();
+  if (/^(?:name|full name|holder name|account holder|account owner|account name|client name|customer name|beneficiary|payee)$/.test(label)) return "name";
+  if (/^(?:account|account number|account no|account id|a\/?c|a\/?c number|a\/?c no|acct|acct number|acct no|acct id|brokerage account|portfolio number|portfolio id|client number|client no|client id|customer number|customer no|customer id|account code)$/.test(label)) return "account";
+  if (/^(?:iban|international bank account number)$/.test(label)) return "iban";
+  if (/^(?:(?:residential|home|mailing|billing|shipping|postal|correspondence|registered|business|office) )?address$/.test(label)) return "address";
+  if (/^(?:reference|reference id|reference number|reference no|ref|ref id|ref number|ref no|client reference|customer reference|transaction reference|payment reference)$/.test(label)) return "reference";
+  return null;
+};
+const rectCenterY = (rect: Rect) => rect.y + rect.height / 2;
+const sameVisualRow = (first: Rect, second: Rect) => Math.abs(rectCenterY(first) - rectCenterY(second)) <= Math.max(8, first.height * .9, second.height * .9);
+const compactIdentifier = (value: string) => value.replace(/\s+/g, " ").trim();
+const isReferenceIdentifier = (value: string) => {
+  const compact = value.replace(/[\s._/-]/g, "");
+  return compact.length >= 5 && compact.length <= 40 && /\d/.test(compact) && /^[A-Z0-9]+$/i.test(compact);
+};
+const statementFieldsFromLayout = (pageItems: TextItem[], lines: ReturnType<typeof groupTextLines>, page: number): StatementFieldCandidate[] => {
+  const candidates: StatementFieldCandidate[] = [];
+  const labelledItems = pageItems
+    .map((item) => ({ item, field: statementFieldKind(item.text) }))
+    .filter((entry): entry is { item: TextItem; field: StatementFieldKind } => Boolean(entry.field));
+
+  for (const { item: labelItem, field } of labelledItems) {
+    const nextLabelX = labelledItems
+      .filter((entry) => entry.item !== labelItem && entry.item.rect.x > labelItem.rect.x && sameVisualRow(entry.item.rect, labelItem.rect))
+      .reduce((nearest, entry) => Math.min(nearest, entry.item.rect.x), Number.POSITIVE_INFINITY);
+    let valueItems = pageItems
+      .filter((candidate) => candidate !== labelItem
+        && candidate.rect.x >= labelItem.rect.x + labelItem.rect.width - 2
+        && candidate.rect.x < nextLabelX - 3
+        && sameVisualRow(candidate.rect, labelItem.rect)
+        && !statementFieldKind(candidate.text))
+      .sort((a, b) => a.rect.x - b.rect.x);
+
+    if (!valueItems.length) {
+      const labelBottom = labelItem.rect.y + labelItem.rect.height;
+      const nextLine = lines.find((line) => {
+        const gap = line.y - labelBottom;
+        return gap >= -2 && gap <= Math.max(22, labelItem.rect.height * 2.2) && !line.items.some((candidate) => statementFieldKind(candidate.text));
+      });
+      valueItems = nextLine?.items.filter((candidate) => candidate.rect.x >= labelItem.rect.x - 4) ?? [];
+    }
+    if (!valueItems.length) continue;
+
+    if (field === "address") {
+      const addressItems = [...valueItems];
+      const valueStartX = Math.min(...valueItems.map((candidate) => candidate.rect.x));
+      let lastBottom = Math.max(...valueItems.map((candidate) => candidate.rect.y + candidate.rect.height));
+      let visualLines = 1;
+      for (const line of lines) {
+        if (visualLines >= 4 || line.y <= rectCenterY(labelItem.rect)) continue;
+        const continuationItems = line.items.filter((candidate) => candidate.rect.x >= valueStartX - 18);
+        if (!continuationItems.length || continuationItems.some((candidate) => statementFieldKind(candidate.text))) continue;
+        const continuationText = textForLine(continuationItems);
+        const gap = line.y - lastBottom;
+        if (gap < -2 || gap > Math.max(24, line.height * 2.2) || addressStop.test(continuationText)) {
+          if (gap > 0) break;
+          continue;
+        }
+        if (!addressContinuation.test(continuationText) && !postalCode.test(continuationText) && visualLines > 1) break;
+        addressItems.push(...continuationItems);
+        lastBottom = Math.max(...continuationItems.map((candidate) => candidate.rect.y + candidate.rect.height));
+        visualLines += 1;
+      }
+      const value = textForLine(addressItems);
+      if (normalizedValue(value).length >= 5) candidates.push({
+        label: value,
+        detector: "Complete address",
+        kind: "PII",
+        confidence: "high",
+        reason: `Appears beside an address label and groups ${visualLines} adjacent postal ${visualLines === 1 ? "line" : "lines"} into one finding.`,
+        page,
+        rects: addressItems.map((candidate) => ({ ...candidate.rect })),
+      });
+      continue;
+    }
+
+    const value = compactIdentifier(valueItems.map((candidate) => candidate.text).join(" "));
+    if (field === "name" && isPersonName(value)) candidates.push({
+      label: value,
+      detector: "Table-labelled person name",
+      kind: "PII",
+      confidence: "high",
+      reason: "Appears immediately beside a dedicated Name or Account holder label in a statement field.",
+      page,
+      rects: valueItems.map((candidate) => ({ ...candidate.rect })),
+    });
+    if (field === "account" && isAccountIdentifier(value)) candidates.push({
+      label: value,
+      detector: "Labelled account or client identifier",
+      kind: "Financial",
+      confidence: "high",
+      reason: "Appears immediately beside an Account, Account number, or equivalent statement label.",
+      page,
+      rects: valueItems.map((candidate) => ({ ...candidate.rect })),
+    });
+    if (field === "iban") {
+      const iban = value.replace(/\s+/g, " ");
+      const confidence: Confidence = isIbanValid(iban) ? "high" : "medium";
+      if (/^[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}$/i.test(iban)) candidates.push({
+        label: iban,
+        detector: "IBAN",
+        kind: "Financial",
+        confidence,
+        reason: confidence === "high" ? validatedReason("an IBAN shown in a labelled statement field") : "Appears beside an IBAN label, but its checksum needs review.",
+        page,
+        rects: valueItems.map((candidate) => ({ ...candidate.rect })),
+      });
+    }
+    if (field === "reference" && isReferenceIdentifier(value)) candidates.push({
+      label: value,
+      detector: "Labelled reference identifier",
+      kind: "Financial",
+      confidence: "high",
+      reason: "Appears immediately beside a Reference or Reference ID label in the statement.",
+      page,
+      rects: valueItems.map((candidate) => ({ ...candidate.rect })),
+    });
+  }
+  return candidates;
+};
 const confidenceRank: Record<Confidence, number> = { low: 1, medium: 2, high: 3 };
 const confidenceMeta: Record<Confidence, { label: string; summary: string }> = {
   high: { label: "HIGH", summary: "Strong pattern, label, or checksum evidence. Selected automatically." },
@@ -368,6 +517,7 @@ const darkRegionSamples = (context: CanvasRenderingContext2D, rect: Rect, width:
 const verifyRedactedPdf = async (
   bytes: Uint8Array,
   selectedRects: Rect[],
+  selectedTerms: string[],
   expectedPages: number,
   signal?: AbortSignal,
   onProgress?: (page: number, total: number) => void,
@@ -383,13 +533,23 @@ const verifyRedactedPdf = async (
   });
   let extractedCharacters = 0;
   let checkedRegions = 0;
+  const extractedFragments: string[] = [];
   try {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       if (signal?.aborted) throw cancellationError();
       onProgress?.(pageNumber, document.numPages);
       const page = await document.getPage(pageNumber);
       const textContent = await page.getTextContent();
-      extractedCharacters += textContent.items.reduce((total, item) => total + ("str" in item ? item.str.trim().length : 0), 0);
+      const pageText = textContent.items.map((item) => "str" in item ? item.str : "").join(" ").trim();
+      extractedFragments.push(pageText);
+      extractedCharacters += pageText.replace(/\s/g, "").length;
+      const annotations = await page.getAnnotations();
+      extractedFragments.push(annotations.map((annotation) => [
+        annotation.title,
+        annotation.contents,
+        annotation.fieldValue,
+        annotation.alternativeText,
+      ].filter((value): value is string => typeof value === "string").join(" ")).join(" "));
       const pageRects = selectedRectsByPage.get(pageNumber) || [];
       if (!pageRects.length) {
         page.cleanup();
@@ -410,10 +570,18 @@ const verifyRedactedPdf = async (
   } finally {
     await loadingTask.destroy();
   }
+  const verificationText = normalizedValue(extractedFragments.join(" "));
+  const termsToCheck = [...new Set(selectedTerms.flatMap((term) => {
+    const parts = term.split(/[\n,;|]+/).map((part) => part.trim()).filter((part) => normalizedValue(part).length >= 4);
+    return [term, ...parts];
+  }).filter((term) => normalizedValue(term).length >= 4))];
+  const leakedTerms = termsToCheck.filter((term) => verificationText.includes(normalizedValue(term)));
   return {
-    passed: document.numPages === expectedPages && extractedCharacters === 0 && checkedRegions === selectedRects.length,
+    passed: document.numPages === expectedPages && extractedCharacters === 0 && leakedTerms.length === 0 && checkedRegions === selectedRects.length,
     pageCount: document.numPages,
     extractedCharacters,
+    checkedTerms: termsToCheck.length,
+    leakedTerms,
     checkedRegions,
     totalRegions: selectedRects.length,
   };
@@ -1114,6 +1282,18 @@ export default function Home() {
           }
           return;
         }
+        const sameArea = [...found.values()].find((candidate) => candidate.detector === detector
+          && candidate.rects.some((existingRect) => groupedRects.some((rect) => rectOverlapRatio(existingRect, rect) >= .55)));
+        if (sameArea) {
+          sameArea.rects = mergeRectsByVisualLine([...sameArea.rects, ...groupedRects]);
+          if (normalizedValue(label).length > normalizedValue(sameArea.label).length) sameArea.label = label;
+          if (confidenceRank[confidence] > confidenceRank[sameArea.confidence]) {
+            sameArea.confidence = confidence;
+            sameArea.reason = reason;
+            sameArea.selected = confidence === "high";
+          }
+          return;
+        }
         found.set(key, {
           id: crypto.randomUUID(),
           label,
@@ -1166,6 +1346,7 @@ export default function Home() {
         const sortedLineHeights = lines.map((line) => line.height).sort((a, b) => a - b);
         const medianLineHeight = sortedLineHeights[Math.floor(sortedLineHeights.length / 2)] || 10;
         documentLines.push(...lines.map((line) => ({ page: pageNumber, text: textForLine(line.items), items: line.items })));
+        statementFieldsFromLayout(pageItems, lines, pageNumber).forEach(registerFinding);
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
           const line = lines[lineIndex];
           const lineText = textForLine(line.items);
@@ -1446,7 +1627,8 @@ export default function Home() {
       if (controller.signal.aborted) throw cancellationError();
       const redactedBytes = Uint8Array.from(await output.save());
       setExportProgress({ stage: "verifying", current: 0, total: pageCount, detail: "Starting independent safety verification…" });
-      const result = await verifyRedactedPdf(redactedBytes, selectedRects, pageCount, controller.signal, (page, total) => {
+      const selectedTerms = selected.filter((finding) => !finding.manual).map((finding) => finding.label);
+      const result = await verifyRedactedPdf(redactedBytes, selectedRects, selectedTerms, pageCount, controller.signal, (page, total) => {
         setExportProgress({ stage: "verifying", current: page, total, detail: `Verifying page ${page} of ${total}…` });
       });
       setVerification(result);
@@ -1963,6 +2145,6 @@ export default function Home() {
       {message && <div className="review-message" role="status">{message}</div>}
     </section>}
 
-    {phase === "done" && <section className="done-screen"><div className="done-glow" /><div className="done-check">✓</div><div className="section-kicker success-kicker">LOCAL EXPORT VERIFIED</div><h1>Redaction complete.</h1><p>{selectedCount} sensitive {selectedCount === 1 ? "item was" : "items were"} burned into a rebuilt PDF and verified before download.</p>{verification && <div className="verification-card"><div><span>✓</span><strong>Post-export safety check passed</strong></div><ul><li><b>{verification.pageCount}</b> pages rebuilt from pixels</li><li><b>{verification.extractedCharacters}</b> extractable source characters remain</li><li><b>{verification.checkedRegions}/{verification.totalRegions}</b> approved regions verified dark</li></ul><small>The exported copy is intentionally image-based and is no longer searchable.</small></div>}<div className="done-actions"><button className="primary-button success-button" onClick={downloadLastExport}>↓ Download again</button><button className="secondary-button" onClick={reset}>Process another document</button></div><div className="stat-grid"><article><strong>{selectedCount}</strong><small>ITEMS REDACTED</small></article><article><strong>{findings.length}</strong><small>ITEMS REVIEWED</small></article><article><strong>{pageCount}</strong><small>PAGES VERIFIED</small></article></div><div className="done-note">The original PDF was not modified or uploaded. Verification also ran only in this browser.</div></section>}
+    {phase === "done" && <section className="done-screen"><div className="done-glow" /><div className="done-check">✓</div><div className="section-kicker success-kicker">LOCAL EXPORT VERIFIED</div><h1>Redaction complete.</h1><p>{selectedCount} sensitive {selectedCount === 1 ? "item was" : "items were"} burned into a rebuilt PDF and verified before download.</p>{verification && <div className="verification-card"><div><span>✓</span><strong>Post-export safety check passed</strong></div><ul><li><b>{verification.pageCount}</b> pages rebuilt from pixels</li><li><b>{verification.extractedCharacters}</b> extractable source characters remain</li><li><b>{verification.checkedTerms}</b> sensitive text values checked for leakage</li><li><b>{verification.checkedRegions}/{verification.totalRegions}</b> approved regions verified dark</li></ul><small>The download starts only after every approved value is absent from the text layer and the exported copy passes the visual-region check.</small></div>}<div className="done-actions"><button className="primary-button success-button" onClick={downloadLastExport}>↓ Download again</button><button className="secondary-button" onClick={reset}>Process another document</button></div><div className="stat-grid"><article><strong>{selectedCount}</strong><small>ITEMS REDACTED</small></article><article><strong>{findings.length}</strong><small>ITEMS REVIEWED</small></article><article><strong>{pageCount}</strong><small>PAGES VERIFIED</small></article></div><div className="done-note">The original PDF was not modified or uploaded. Verification also ran only in this browser.</div></section>}
   </main>;
 }

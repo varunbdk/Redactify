@@ -91,6 +91,11 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /bareNameLabel/);
   assert.match(page, /labelledAccountIdentifier/);
   assert.match(page, /isAccountIdentifier/);
+  assert.match(page, /personNamePart/);
+  assert.match(page, /statementFieldsFromLayout/);
+  assert.match(page, /statementFieldKind/);
+  assert.match(page, /Labelled reference identifier/);
+  assert.match(page, /rectOverlapRatio/);
   assert.match(page, /Table-labelled person name/);
   assert.match(page, /Labelled account or client identifier/);
   assert.match(page, /type Confidence = "high" \| "medium" \| "low"/);
@@ -133,6 +138,9 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /exportProgress/);
   assert.match(page, /Cancel export/);
   assert.match(page, /selectedRectsByPage/);
+  assert.match(page, /selectedTerms/);
+  assert.match(page, /leakedTerms/);
+  assert.match(page, /sensitive text values checked for leakage/);
   assert.match(page, /↶ Undo/);
   assert.match(page, /↷ Redo/);
   assert.match(page, /redoRef/);
