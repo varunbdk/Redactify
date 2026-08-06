@@ -78,6 +78,8 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   ]);
 
   assert.match(page, /function PdfPageView/);
+  assert.match(page, /new URLSearchParams\(window\.location\.search\)\.get\("for"\)/);
+  assert.match(page, /href="\/\?for=chatgpt-users"/);
   assert.match(page, /page\.render\(/);
   assert.match(page, /LIVE PDF REVIEW/);
   assert.match(page, /Draw redaction/);

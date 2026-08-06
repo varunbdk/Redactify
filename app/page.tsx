@@ -1999,7 +1999,7 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
           <div className="footer-brand"><button className="brand-button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} aria-label="Back to the top"><span className="brand-icon"><i /><i /><i /></span><strong>Redactify</strong></button><p>Redact sensitive details privately, directly from your device.</p></div>
           <div className="footer-column"><strong>Product</strong><a href="#privacy-story">How it works</a><a href="#features">Features</a><a href="#pricing">Pricing</a></div>
           <div className="footer-column"><strong>Resources</strong><a href="#faq">FAQ</a><a href="#quick-upload">Text-based PDFs</a><a href="#privacy-story">Privacy promise</a></div>
-          <div className="footer-column"><strong>For</strong><a href="/for/chatgpt-users">ChatGPT Users</a><a href="/for/claude-users">Claude Users</a><a href="/for/legal-professionals">Legal professionals</a><a href="/for/financial-services-professionals">Financial services professionals</a><a href="/for/recruiters">Recruiters</a></div>
+          <div className="footer-column"><strong>For</strong><a href="/?for=chatgpt-users">ChatGPT Users</a><a href="/?for=claude-users">Claude Users</a><a href="/?for=legal-professionals">Legal professionals</a><a href="/?for=financial-services-professionals">Financial services professionals</a><a href="/?for=recruiters">Recruiters</a></div>
           <div className="footer-column"><strong>Company</strong><a href="#privacy-story">Privacy</a><a href="#faq">Terms of use</a><a href="#faq">Cookies</a></div>
         </div>
         <div className="footer-bottom"><span>© 2026 Redactify. All rights reserved.</span><span>Local PDF redaction</span></div>
@@ -2162,5 +2162,14 @@ export function RedactifyExperience({ audienceKey }: { audienceKey?: AudienceKey
 }
 
 export default function Home() {
-  return <RedactifyExperience />;
+  const [audienceKey, setAudienceKey] = useState<AudienceKey>();
+
+  useEffect(() => {
+    const requestedAudience = new URLSearchParams(window.location.search).get("for");
+    if (requestedAudience && requestedAudience in audiencePages) {
+      setAudienceKey(requestedAudience as AudienceKey);
+    }
+  }, []);
+
+  return <RedactifyExperience audienceKey={audienceKey} />;
 }
