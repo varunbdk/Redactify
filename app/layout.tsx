@@ -14,18 +14,18 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://redactify.varun-bdk.workers.dev"),
-  title: "helpredact.com — Local PDF redaction",
+  title: "helpRedact.com — Local PDF redaction",
   description:
     "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
   openGraph: {
-    title: "helpredact.com — Get sensitive details redacted, instantly!",
+    title: "helpRedact.com — Get sensitive details redacted, instantly!",
     description:
       "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
     images: ["/og-warm.png"],
   },
   twitter: {
     card: "summary_large_image",
-    title: "helpredact.com — Get sensitive details redacted, instantly!",
+    title: "helpRedact.com — Get sensitive details redacted, instantly!",
     description:
       "Find, review, and permanently redact sensitive PDF content entirely in your browser.",
     images: ["/og-warm.png"],

@@ -3,7 +3,7 @@ export const audiencePages = {
     name: "ChatGPT Users",
     eyebrow: "PREPARE PDFs FOR CHATGPT",
     title: "Redact private details before sharing a PDF with ChatGPT",
-    description: "Prepare a safer copy for summarising, analysing, or discussing with ChatGPT—without sending the original document to helpredact.com.",
+    description: "Prepare a safer copy for summarising, analysing, or discussing with ChatGPT—without sending the original document to helpRedact.com.",
     benefits: [
       "Find names, addresses, account details, IDs, and other sensitive text quickly.",
       "Review, resize, remove, or add every redaction before anything is applied.",
@@ -36,7 +36,7 @@ export const audiencePages = {
     name: "Financial services professionals",
     eyebrow: "PRIVATE REDACTION FOR FINANCIAL DOCUMENTS",
     title: "Redact financial documents quickly, with every decision visible",
-    description: "Review statements and client documents for account holders, account numbers, IBANs, addresses, and reference IDs without uploading the source file to helpredact.com.",
+    description: "Review statements and client documents for account holders, account numbers, IBANs, addresses, and reference IDs without uploading the source file to helpRedact.com.",
     benefits: [
       "Use statement-aware detection for labelled financial and customer information.",
       "Group fragmented details and multi-line addresses into clearer suggestions.",

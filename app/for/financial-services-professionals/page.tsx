@@ -3,7 +3,7 @@ import { RedactifyExperience } from "../../page";
 import { audiencePages } from "../../audience-pages";
 
 export const metadata: Metadata = {
-  title: "Financial services professionals — helpredact.com",
+  title: "Financial services professionals — helpRedact.com",
   description: audiencePages["financial-services-professionals"].description,
 };
 

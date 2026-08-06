@@ -29,7 +29,7 @@ test("server-renders the Redactify product and local-processing promise", async 
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>helpredact\.com — Local PDF redaction<\/title>/i);
+  assert.match(html, /<title>helpRedact\.com — Local PDF redaction<\/title>/);
   assert.match(html, /Get sensitive details/);
   assert.match(html, /redacted,.*instantly!/);
   assert.match(html, /How it works/);
@@ -37,7 +37,7 @@ test("server-renders the Redactify product and local-processing promise", async 
   assert.match(html, /Pricing/);
   assert.match(html, /FAQ/);
   assert.match(html, /Start redacting, for free/);
-  assert.match(html, /Free while helpredact\.com is in beta/);
+  assert.match(html, /Free while helpRedact\.com is in beta/);
   assert.match(html, /Legal professionals/);
   assert.match(html, /Financial services professionals/);
   assert.match(html, /Recruiters/);
@@ -145,7 +145,7 @@ test("includes real-page review and manual-redaction capabilities", async () => 
   assert.match(page, /pagesWithoutText/);
   assert.match(page, /Choose another PDF/);
   assert.match(page, /loadSamplePdf/);
-  assert.match(page, /HELPREDACT\.COM SAMPLE — FICTIONAL DATA/);
+  assert.match(page, /helpRedact\.com SAMPLE — FICTIONAL DATA/);
   assert.match(page, /Maximum file size: 50 MB/);
   assert.match(page, /MAX_DOCUMENT_PAGES = 300/);
   assert.match(page, /MAX_CANVAS_PIXELS = 12_000_000/);
